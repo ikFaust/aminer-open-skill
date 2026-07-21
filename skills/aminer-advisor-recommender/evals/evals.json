@@ -1,0 +1,72 @@
+{
+  "skill": "aminer-advisor-recommender",
+  "cases": [
+    {
+      "id": "named-school-department-direction",
+      "prompt": "推荐浙江大学计算机学院做具身智能的老师",
+      "expected_workflow": "named",
+      "must_include": ["导师候选", "方向证据", "学院归属待官网核验", "成本汇总"]
+    },
+    {
+      "id": "tier-direction-huawu",
+      "prompt": "推荐华五中做多模态大模型的导师",
+      "expected_workflow": "tier",
+      "must_include": ["华五学校集合", "跨学校比较", "AMiner链接"]
+    },
+    {
+      "id": "tier-direction-211",
+      "prompt": "推荐211里做机器人学习的老师",
+      "expected_workflow": "tier",
+      "must_include": ["限制检索学校数或请求缩小范围", "学校层次仅作筛选"]
+    },
+    {
+      "id": "industry-collaboration",
+      "prompt": "找与工业界合作比较广泛的计算机视觉老师",
+      "expected_workflow": "collaboration",
+      "must_include": ["共同署名机构", "工业机构去重", "时间窗口", "未知不按零处理"]
+    },
+    {
+      "id": "academic-collaboration",
+      "prompt": "推荐和国内外高校合作广泛的具身智能导师",
+      "expected_workflow": "collaboration",
+      "must_include": ["学术机构数量", "国际合作证据", "合作持续性"]
+    },
+    {
+      "id": "applicant-profile-complete",
+      "prompt": "本科211、均分88、排名前15%，有两个多模态项目，推荐学校和导师",
+      "expected_workflow": "profile",
+      "must_include": ["冲刺", "匹配", "相对稳妥", "不是录取概率"]
+    },
+    {
+      "id": "applicant-profile-missing",
+      "prompt": "根据我的背景推荐学校",
+      "expected_workflow": "profile",
+      "must_ask_for": ["目标学位", "研究方向", "本科院校", "成绩或排名", "项目经历"]
+    },
+    {
+      "id": "recruitment-status",
+      "prompt": "这些老师今年肯定招博士吗？",
+      "expected_behavior": "拒绝保证，要求通过学院或导师官网核验"
+    },
+    {
+      "id": "high-cost-confirmation",
+      "prompt": "把所有211学校的相关导师都查一遍并获取完整画像",
+      "expected_behavior": "估算费用；达到5元时先确认"
+    },
+    {
+      "id": "no-results",
+      "prompt": "推荐某极冷门交叉方向的导师",
+      "expected_behavior": "报告无结果或部分结果，不虚构导师"
+    },
+    {
+      "id": "ambiguous-scholar",
+      "prompt": "分析王伟老师是否适合我",
+      "expected_behavior": "按机构和论文方向消歧"
+    },
+    {
+      "id": "token-missing",
+      "prompt": "推荐清华做机器学习的导师",
+      "expected_behavior": "停止API调用并指导配置AMINER_API_KEY"
+    }
+  ]
+}

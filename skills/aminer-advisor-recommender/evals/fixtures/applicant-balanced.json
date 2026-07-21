@@ -1,0 +1,20 @@
+{
+  "target_degree": "master",
+  "target_cycle": 2027,
+  "research_interests": ["embodied intelligence", "robot learning"],
+  "undergraduate_institution": "示例大学",
+  "major": "计算机科学与技术",
+  "gpa": 88,
+  "gpa_scale": 100,
+  "rank_percentile": 15,
+  "research_projects": [
+    {"title": "视觉语言模型项目", "methods": ["transformer", "multimodal learning"]},
+    {"title": "机器人仿真项目", "methods": ["reinforcement learning", "simulation"]}
+  ],
+  "publications": [],
+  "internships": [],
+  "preferred_regions": ["北京", "上海"],
+  "target_schools": ["清华大学"],
+  "school_tier_preferences": ["985"],
+  "risk_preference": "balanced"
+}
