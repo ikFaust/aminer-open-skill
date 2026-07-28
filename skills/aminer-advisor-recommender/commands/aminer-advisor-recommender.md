@@ -1,6 +1,6 @@
 ---
-description: Recommend schools and prospective advisors using AMiner evidence
-argument-hint: [school/tier, department, direction, collaboration preference, or applicant profile]
+description: Discover schools and recommend prospective advisors using AMiner evidence
+argument-hint: [direction, school/tier, department, collaboration preference, or applicant profile]
 allowed-tools: Read, Bash, Glob, Grep
 ---
 
@@ -30,10 +30,11 @@ If missing, stop and direct the user to the AMiner console or the repository tok
 - `tier`: the user gives a direction and a tier such as 华五, 985, or 211.
 - `collaboration`: the user prioritizes academic or industry collaboration breadth.
 - `profile`: the user supplies education, grades/rank, projects, publications, or internships and wants school/advisor matching.
+- `discover`: the user gives a direction and asks which institutions are active, without preselecting schools.
 
-Ask only for essential missing fields. For profile mode, require target degree, direction, undergraduate institution, grade or rank, meaningful project/research experience, and either target schools or a tier.
+Ask only for essential missing fields. For profile mode, require target degree, direction, undergraduate institution, grade or rank, and meaningful project/research experience. Target schools are optional: by default the script discovers direction-evidenced schools and expands an aspirational list downward to form a cross-tier portfolio.
 
-For a large tier, ask for a region or smaller school set before broad retrieval. Estimate cost and obtain confirmation before a planned chain reaches ¥5.00.
+For a large tier, ask for a region or smaller school set before broad retrieval. Let the script enforce `--max-cost 5`; use `--yes` only after showing the estimate and obtaining explicit confirmation.
 
 ## 3. Run
 
@@ -54,4 +55,4 @@ Render the returned JSON as a concise Chinese comparison table. Include:
 - exact API call and cost summary;
 - an explicit statement that candidates are not confirmed current supervisors and reach/match/safer labels are not admission probabilities.
 
-If the API returns no result, report that honestly and offer a narrower synonym or explicit school list. Never fabricate a scholar, affiliation, collaboration, or recruitment status.
+If the API returns `errors`, distinguish API failure from a successful empty result. For no matches, show the returned fallback suggestions. Never fabricate a scholar, affiliation, collaboration, or recruitment status, and never claim international collaboration from the current output.

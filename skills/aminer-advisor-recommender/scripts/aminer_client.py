@@ -34,6 +34,20 @@ API_SPEC: dict[str, tuple[str, str, float]] = {
 }
 
 
+class AMinerAPIError(RuntimeError):
+    """An HTTP, authentication, parameter, or AMiner envelope failure."""
+
+    def __init__(self, api: str, code: Any, message: str, detail: Any = None) -> None:
+        super().__init__(f"{api} failed (code={code}): {message}")
+        self.api = api
+        self.code = code
+        self.message = message
+        self.detail = detail
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"api": self.api, "code": self.code, "message": self.message, "detail": self.detail}
+
+
 @dataclass
 class CostLedger:
     calls: list[dict[str, Any]] = field(default_factory=list)
@@ -78,7 +92,6 @@ class AMinerClient:
         if api not in API_SPEC:
             raise ValueError(f"Unsupported API: {api}")
         method, path, _ = API_SPEC[api]
-        self.cost.add(api)
         headers = {
             "Authorization": self.token,
             "X-Platform": "openclaw",
@@ -107,6 +120,16 @@ class AMinerClient:
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     payload = json.loads(response.read().decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise AMinerAPIError(api, "invalid_response", "response is not a JSON object")
+                if payload.get("success") is not True:
+                    raise AMinerAPIError(
+                        api,
+                        payload.get("code", "unknown"),
+                        str(payload.get("msg") or "AMiner returned success=false"),
+                        payload.get("error"),
+                    )
+                self.cost.add(api)
                 return payload
             except urllib.error.HTTPError as exc:
                 raw = exc.read().decode("utf-8", errors="replace")
@@ -114,25 +137,25 @@ class AMinerClient:
                     detail: Any = json.loads(raw)
                 except json.JSONDecodeError:
                     detail = raw
-                last_error = {
-                    "code": exc.code,
-                    "success": False,
-                    "msg": str(exc.reason),
-                    "error": detail,
-                }
+                last_error = {"code": exc.code, "msg": str(exc.reason), "detail": detail}
                 if exc.code not in RETRYABLE_STATUS:
-                    return last_error
+                    raise AMinerAPIError(api, exc.code, str(exc.reason), detail) from exc
             except (urllib.error.URLError, TimeoutError) as exc:
-                last_error = {"code": -1, "success": False, "msg": str(exc)}
+                last_error = {"code": -1, "msg": str(exc), "detail": None}
             if attempt + 1 < self.max_retries:
                 time.sleep((2**attempt) + random.uniform(0, 0.2))
-        return last_error or {"code": -1, "success": False, "msg": "request failed"}
+        error = last_error or {"code": -1, "msg": "request failed", "detail": None}
+        raise AMinerAPIError(api, error["code"], error["msg"], error.get("detail"))
 
 
 def unwrap(payload: Any) -> list[dict[str, Any]]:
     """Return record dictionaries from the standard AMiner envelope."""
-    if not isinstance(payload, dict) or payload.get("success") is not True:
-        return []
+    if not isinstance(payload, dict):
+        raise ValueError("AMiner payload must be a dictionary")
+    if payload.get("success") is not True:
+        raise AMinerAPIError(
+            "unknown", payload.get("code", "unknown"), str(payload.get("msg") or "success=false")
+        )
     data = payload.get("data")
     if isinstance(data, dict):
         return [data]
@@ -161,14 +184,16 @@ def main() -> None:
         client = AMinerClient(os.getenv("AMINER_API_KEY", ""), timeout=args.timeout)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    result = client.call(args.api, params)
-    json.dump(
-        {"api": args.api, "cost": client.cost.summary(), "result": result},
-        sys.stdout,
-        ensure_ascii=False,
-        indent=2,
-    )
+    try:
+        result = client.call(args.api, params)
+        output = {"api": args.api, "cost": client.cost.summary(), "result": result, "errors": []}
+        exit_code = 0
+    except AMinerAPIError as exc:
+        output = {"api": args.api, "cost": client.cost.summary(), "result": None, "errors": [exc.to_dict()]}
+        exit_code = 2
+    json.dump(output, sys.stdout, ensure_ascii=False, indent=2)
     print()
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

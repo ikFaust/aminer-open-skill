@@ -145,7 +145,7 @@ curl -X POST \
 - `skills/pdf-citation-verifier/SKILL.md`: PDF Citation Verifier skill definition and runtime constraints
 - `skills/pdf-citation-verifier/scripts/verify_pdf.py`: HTTP client that uploads the PDF and polls the verifier job
 - `skills/aminer-advisor-recommender/SKILL.md`: school/advisor recommendation workflows, scoring boundaries, and cost controls
-- `skills/aminer-advisor-recommender/scripts/recommend.py`: unified CLI for the four recommendation modes
+- `skills/aminer-advisor-recommender/scripts/recommend.py`: unified CLI for five discovery and recommendation modes
 - `skills/aminer-advisor-recommender/commands/aminer-advisor-recommender.md`: Claude Code slash command
 
 ## Notes

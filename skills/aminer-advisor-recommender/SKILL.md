@@ -1,6 +1,6 @@
 ---
 name: aminer-advisor-recommender
-description: Recommend Chinese universities, schools/departments, and prospective advisors using AMiner evidence and an applicant profile. Use when a user asks for advisors in a named university, school, or research direction; filters by university tier such as 华五/985/211/双一流; compares advisors by academic, international, or industry collaboration breadth; or wants reach/match/safer school and advisor suggestions based on undergraduate institution, grades, research, projects, publications, internships, degree target, and location preferences.
+description: Discover Chinese institutions by research direction and recommend prospective advisors using AMiner evidence and an applicant profile. Use when a user asks which institutions are active in a direction; asks for advisors in a named university, school, or direction; filters by tiers such as 华五/985/211/双一流; compares publication-based academic or industry collaboration breadth; or wants heuristic reach/match/safer school and advisor suggestions based on undergraduate institution, grades, research, projects, publications, internships, degree target, and location preferences.
 ---
 
 # AMiner Advisor Recommender
@@ -11,10 +11,11 @@ Use AMiner Open Platform REST APIs as the academic-data layer. Plan searches, no
 
 Choose one workflow:
 
-1. **Named institution**: school + school/department + direction -> advisor candidates.
-2. **Tier and direction**: direction + 华五/985/211/双一流 or a user-provided school set -> institution and advisor candidates.
-3. **Collaboration breadth**: direction/institution -> candidates -> coauthors and affiliations -> academic/industry/international collaboration comparison.
-4. **Applicant matching**: applicant profile -> reach/match/safer school groups -> advisor candidates in each group.
+1. **Direction discovery**: direction -> institutions with matched-paper evidence.
+2. **Named institution**: school + school/department + direction -> prospective advisor candidates.
+3. **Tier and direction**: direction + 华五/985/211/双一流 or a user-provided school set -> institution and prospective advisor candidates.
+4. **Collaboration breadth**: direction/institution -> candidates -> coauthors and affiliations -> academic/industry collaboration comparison.
+5. **Applicant matching**: applicant profile -> direction-based school discovery -> cross-tier heuristic portfolio -> prospective advisor candidates.
 
 For applicant matching, read [references/applicant-schema.md](references/applicant-schema.md). For ranking or collaboration analysis, read [references/scoring-rubric.md](references/scoring-rubric.md). For school-tier filters, read [references/school-tiers.md](references/school-tiers.md). Before calling AMiner, read [references/api-workflows.md](references/api-workflows.md).
 
@@ -28,18 +29,30 @@ For applicant matching, read [references/applicant-schema.md](references/applica
 ## Collect candidates
 
 1. Normalize the requested research direction into the user's wording plus a small set of English/Chinese aliases.
-2. Resolve institutions and departments before resolving people.
+2. Resolve institutions to canonical AMiner organization IDs before resolving people. Treat department matching as unverified when AMiner lacks department-level data.
 3. Search broadly with free or low-cost endpoints, then fetch deeper evidence only for a short list. Default to 10 candidates unless the user specifies otherwise.
-4. Disambiguate scholars by institution, department, research interests, and recent publications. Call every result a prospective advisor candidate until an official page confirms faculty role and supervision eligibility.
+4. Link paper authors only when their paper affiliation matches the resolved organization ID. Then require exact name and exact organization in `person_search`. If several profiles still match, return one unresolved identity with alternate IDs and no fabricated profile URL.
 5. Use recent publications to verify direction fit. Prefer a five-year window unless the user requests another period.
 6. Build collaboration evidence from coauthors and their affiliations. Do not infer an industry relationship from an email domain or model knowledge alone.
-7. Preserve source identifiers, AMiner URLs, years, and the API used for every factual claim.
+7. Require every candidate to have at least one non-empty, dated, direction-matched paper. Preserve source identifiers, AMiner URLs, years, and the API used for every factual claim.
 
 ## Run workflows
 
 Run commands from the skill directory. Save JSON when the result must be reused; otherwise read stdout and render the required user-facing table.
 
-### 1. Named school, department, and direction
+### 1. Discover institutions by direction
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/recommend.py" \
+  --mode discover \
+  --direction "具身智能" \
+  --aliases "embodied intelligence,embodied AI" \
+  --paper-limit 10
+```
+
+Treat the output as AMiner coverage within the inspected paper sample, not a national university ranking. Feed selected institutions into `named`, `collaboration`, or `profile` mode.
+
+### 2. Named school, department, and direction
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/recommend.py" \
@@ -53,7 +66,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/recommend.py" \
 
 Treat the department as a requested constraint. If AMiner does not return department-level affiliation, label it unverified and direct the user to the official school page.
 
-### 2. Direction within a school tier
+### 3. Direction within a school tier
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/recommend.py" \
@@ -66,7 +79,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/recommend.py" \
 
 For a large group such as 211, ask for region, explicit schools, or a smaller maximum before broad retrieval. Never silently imply that the first truncated schools represent the whole tier.
 
-### 3. Collaboration breadth
+### 4. Collaboration breadth
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/recommend.py" \
@@ -74,12 +87,12 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/recommend.py" \
   --school "清华大学" \
   --direction "computer vision" \
   --collaboration-type industry \
-  --collaboration-papers 10
+  --paper-limit 10
 ```
 
 Collaboration evidence comes from paper coauthors' returned organization IDs. `paper_detail` and `org_detail` are paid but low-cost. Report the declared paper window and the number of inspected papers. A coauthored paper is evidence of publication collaboration, not proof of a formal partnership.
 
-### 4. Applicant-profile matching
+### 5. Applicant-profile matching
 
 Collect the fields in `references/applicant-schema.md`, create a temporary JSON file, and run:
 
@@ -93,16 +106,22 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/recommend.py" \
 
 Do not store the applicant file inside the skill unless the user explicitly asks. If target schools or a tier are missing, ask the user to provide them; AMiner academic data alone cannot infer a complete admissions portfolio.
 
+By default, profile mode uses AMiner direction evidence to add lower-tier institutions when capacity remains under `--max-schools`. It then reserves output space for every available reach/match/safer band, instead of allowing high-scoring reach candidates to fill the whole result. Use `--no-auto-expand-profile` only when the user explicitly wants a closed school list. Automatic additions are candidate schools from the inspected AMiner sample, not admissions guarantees or a complete national ranking; if a band has no evidence-backed candidate, report it as missing rather than fabricating one.
+
 ## Control retrieval
 
 - `--paper-limit`: papers returned per direction/school query; default 10.
 - `--max-author-lookups`: distinct paper-author names resolved per school; default 30.
 - `--candidate-limit`: final rows; default 10.
-- `--collaboration-papers`: paid paper details inspected across candidates; default 0 except collaboration mode.
 - `--max-schools`: school cap for tier queries; default 5.
 - `--schools`: comma-separated explicit override for a tier.
+- `--verify-roles N`: call paid `person_detail` for up to N shortlisted candidates per school; default 0.
+- `--max-cost`: reject a worst-case estimate at or above this amount; default ¥5.00.
+- `--yes`: proceed above `--max-cost` only after the user explicitly confirms the estimate.
+- `--allow-name-fallback` and `--allow-cross-discipline`: relax identity or discipline filters only when the user accepts the added noise.
+- `--no-auto-expand-profile`: disable the default cross-tier school expansion for a closed-list comparison.
 
-Estimate the maximum paid cost before increasing these limits. The script returns an exact cost ledger after execution.
+The script estimates worst-case cost before any API call and returns the successful-call ledger afterward. Failed calls are reported as errors and are not counted as successful paid calls.
 
 ## Rank and classify
 
@@ -133,6 +152,8 @@ Use these labels consistently:
 
 - Never claim guaranteed admission or provide a numerical admission probability without an appropriate validated admissions dataset.
 - Never claim an advisor is recruiting from publication activity alone. Direct users to the official department/advisor page.
+- Never call unresolved name collisions verified people or emit an AMiner profile URL for them.
+- Do not claim international collaboration: the current implementation classifies academic/industry affiliation only and has no verified country dimension.
 - Do not expose tokens or include them in logs, generated files, commands, or error messages.
 - Minimize personal data. Do not persist an applicant profile unless explicitly requested.
 - Report empty or partial results honestly; never fabricate advisors, papers, affiliations, collaborations, or rankings.

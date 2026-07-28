@@ -1,0 +1,22 @@
+{
+  "target_degree": "master",
+  "target_cycle": 2027,
+  "research_interests": ["computer vision", "deep learning"],
+  "undergraduate_institution": "某省属二本院校",
+  "major": "计算机科学与技术",
+  "gpa": 82,
+  "gpa_scale": 100,
+  "rank_percentile": 30,
+  "research_projects": [
+    {
+      "title": "图像分类课程项目",
+      "methods": ["convolutional neural network", "PyTorch"]
+    }
+  ],
+  "publications": [],
+  "internships": [],
+  "preferred_regions": ["江苏", "上海", "江西"],
+  "target_schools": ["苏州大学", "上海大学", "南昌大学"],
+  "school_tier_preferences": ["211"],
+  "risk_preference": "balanced"
+}
