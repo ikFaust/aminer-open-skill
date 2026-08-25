@@ -94,7 +94,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/recommend.py" \
   --paper-limit 10
 ```
 
-Collaboration evidence comes from paper coauthors' returned organization IDs. `paper_detail` and `org_detail` are paid but low-cost. Report the declared paper window and the number of inspected papers. A coauthored paper is evidence of publication collaboration, not proof of a formal partnership.
+Collaboration evidence comes from paper coauthors' returned organization IDs. `paper_detail` and `org_detail` are paid but low-cost. Report the declared paper window and the number of inspected papers. A coauthored paper is evidence of publication collaboration, not proof of a formal partnership. This mode sees co-authorship breadth only: AMiner paper data cannot verify employment history (for example a past industry position), so when the user asks for career-history depth, state this limitation and direct them to the person's official homepage instead of inferring. When one candidate's collaboration count is dominated by a single many-author paper (such as a survey), report that concentration instead of presenting it as broad collaboration.
 
 ### 5. Applicant-profile matching
 
@@ -158,6 +158,7 @@ Use these labels consistently:
 - Never claim an advisor is recruiting from publication activity alone. Direct users to the official department/advisor page.
 - Never call unresolved name collisions verified people or emit an AMiner profile URL for them.
 - Do not claim international collaboration: the current implementation classifies academic/industry affiliation only and has no verified country dimension.
+- Never present co-authorship breadth as employment history: AMiner paper data cannot verify that a scholar held a position at a collaborating organization.
 - Do not expose tokens or include them in logs, generated files, commands, or error messages.
 - Minimize personal data. Do not persist an applicant profile unless explicitly requested.
 - Report empty or partial results honestly; never fabricate advisors, papers, affiliations, collaborations, or rankings.
