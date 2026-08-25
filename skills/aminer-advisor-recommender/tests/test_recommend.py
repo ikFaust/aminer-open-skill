@@ -28,6 +28,7 @@ from recommend import (  # noqa: E402
     resolve_people,
     score_candidates,
     select_profile_portfolio,
+    verify_candidate_roles,
 )
 
 
@@ -157,10 +158,41 @@ class RecommendationLogicTests(unittest.TestCase):
             def call(self, api, params):
                 raise AssertionError(f"unexpected paid call: {api}")
 
-        enrich_collaboration(NoOrgDetailClient(), {"p1": candidate}, details)
+        enrich_collaboration(NoOrgDetailClient(), {"p1": candidate}, details, [])
         self.assertEqual(list(candidate.collaboration_orgs.values()), ["清华大学"])
         self.assertTrue(next(iter(candidate.collaboration_orgs)).startswith("name:"))
         self.assertEqual(candidate.collaboration_types[next(iter(candidate.collaboration_orgs))], "academic")
+
+    def test_org_detail_failure_degrades_to_name_classification(self):
+        candidate = Candidate(person_id="p1", name="A", org_id="o1")
+        candidate.papers["x1"] = {"id": "x1", "title": "Computer Vision", "year": 2025,
+                                  "direction_term_match": True, "matched_terms": ["vision"]}
+        details = {"x1": {"id": "x1", "authors": [
+            {"name": "A", "org": "Target University", "orgid": "o1"},
+            {"name": "B", "org": "华为技术有限公司", "orgid": "o2"},
+        ]}}
+
+        class FailingOrgDetailClient:
+            def call(self, api, params):
+                assert api == "org_detail"
+                raise AMinerAPIError(api, 500, "gateway error")
+
+        warnings = []
+        enrich_collaboration(FailingOrgDetailClient(), {"p1": candidate}, details, warnings)
+        self.assertEqual(candidate.collaboration_types["o2"], "industry")
+        self.assertIn("org_detail failed", warnings[0])
+
+    def test_person_detail_failure_keeps_candidate_unverified(self):
+        candidate = Candidate(person_id="p1", name="A")
+
+        class FailingPersonDetailClient:
+            def call(self, api, params):
+                raise AMinerAPIError(api, 503, "unavailable")
+
+        warnings = []
+        verify_candidate_roles(FailingPersonDetailClient(), {"p1": candidate}, 1, warnings)
+        self.assertTrue(candidate.role_unverified)
+        self.assertIn("person_detail failed", warnings[0])
 
     def test_second_tier_to_985_is_reach(self):
         profile = {

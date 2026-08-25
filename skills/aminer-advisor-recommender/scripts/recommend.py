@@ -349,7 +349,8 @@ def classify_org(name: str) -> str:
 
 
 def enrich_collaboration(
-    client: AMinerClient, candidates: dict[str, Candidate], details: dict[str, dict[str, Any]]
+    client: AMinerClient, candidates: dict[str, Candidate], details: dict[str, dict[str, Any]],
+    warnings: list[str],
 ) -> None:
     candidate_names: dict[str, list[Candidate]] = defaultdict(list)
     for candidate in candidates.values():
@@ -379,7 +380,16 @@ def enrich_collaboration(
     ))
     verified_types: dict[str, str] = {}
     if org_ids:
-        for row in unwrap(client.call("org_detail", {"ids": org_ids[:100]})):
+        # A failed org_detail call must not discard already-collected candidates;
+        # degrade to name-based classification and report the failure.
+        try:
+            rows = unwrap(client.call("org_detail", {"ids": org_ids[:100]}))
+        except AMinerAPIError as exc:
+            warnings.append(
+                f"org_detail failed ({exc.message}); collaboration types fall back to name-based classification"
+            )
+            rows = []
+        for row in rows:
             org_id = str(row.get("id") or row.get("org_id") or "")
             raw_type = normalized_text(row.get("type"))
             if any(term in raw_type for term in ("enterprise", "company", "industry")):
@@ -459,7 +469,15 @@ def verify_candidate_roles(client: AMinerClient, candidates: dict[str, Candidate
     for candidate in ranked:
         if candidate.person_id.startswith("unresolved:"):
             continue
-        rows = unwrap(client.call("person_detail", {"id": candidate.person_id}))
+        # A failed person_detail lookup keeps the candidate with an unverified role
+        # instead of aborting the whole run.
+        try:
+            rows = unwrap(client.call("person_detail", {"id": candidate.person_id}))
+        except AMinerAPIError as exc:
+            warnings.append(
+                f"person_detail failed for {candidate.display_name} ({exc.message}); role remains unverified"
+            )
+            continue
         if not rows:
             continue
         row = rows[0]
@@ -666,7 +684,7 @@ def recommend_for_school(
         candidate.source_schools.add(school)
     candidates = filter_discipline_conflicts(candidates, terms, allow_cross_discipline, warnings)
     if include_collaboration:
-        enrich_collaboration(client, candidates, details)
+        enrich_collaboration(client, candidates, details, warnings)
     score_candidates(candidates, terms, school, department, profile)
     if verify_roles:
         verify_candidate_roles(client, candidates, verify_roles, warnings)
@@ -791,6 +809,7 @@ def main() -> None:
         )
 
     warnings: list[str] = []
+    errors: list[dict[str, Any]] = []
     if requested_school_count > len(schools):
         warnings.append(f"school cap omitted {requested_school_count - len(schools)} schools; provide a region or explicit list")
     try:
@@ -802,7 +821,7 @@ def main() -> None:
             institutions = discover_institutions(client, args.direction, aliases, args.paper_limit, warnings)
             result = {
                 "workflow": "discover", "query": {"direction": args.direction, "aliases": aliases},
-                "institutions": institutions[: args.candidate_limit], "warnings": warnings, "errors": [],
+                "institutions": institutions[: args.candidate_limit], "warnings": warnings, "errors": errors,
                 "cost_estimate": estimate, "cost": client.cost.summary(),
             }
             write_result(result, args.output)
@@ -842,11 +861,19 @@ def main() -> None:
         per_school: dict[str, int] = {}
         organization_cache: dict[str, ResolvedOrganization | None] = {}
         for school in schools:
-            found = recommend_for_school(
-                client, school, args.department, args.direction, aliases, args.paper_limit, profile,
-                args.max_author_lookups, args.allow_name_fallback, args.verify_roles, warnings, organization_cache,
-                args.mode == "collaboration", args.allow_cross_discipline,
-            )
+            # One school failing (network, gateway, auth on a single call chain)
+            # must not discard results already collected for other schools.
+            try:
+                found = recommend_for_school(
+                    client, school, args.department, args.direction, aliases, args.paper_limit, profile,
+                    args.max_author_lookups, args.allow_name_fallback, args.verify_roles, warnings, organization_cache,
+                    args.mode == "collaboration", args.allow_cross_discipline,
+                )
+            except AMinerAPIError as exc:
+                per_school[school] = 0
+                errors.append({"school": school, **exc.to_dict()})
+                warnings.append(f"school {school} failed ({exc.message}); results below exclude this school")
+                continue
             per_school[school] = len(found)
             for person_id, candidate in found.items():
                 if person_id not in all_candidates:
@@ -894,7 +921,7 @@ def main() -> None:
                                  "auto_added_schools": auto_added_schools},
             "candidates": [candidate.to_dict() for candidate in ranked],
             "portfolio_band_counts": portfolio_band_counts if args.mode == "profile" else None,
-            "warnings": list(dict.fromkeys(warnings)), "errors": [], "cost_estimate": estimate,
+            "warnings": list(dict.fromkeys(warnings)), "errors": errors, "cost_estimate": estimate,
             "cost": client.cost.summary(),
             "fallback": {
                 "suggestions": ["try English/official organization names", "add direction aliases", "use --mode discover"]
@@ -911,7 +938,7 @@ def main() -> None:
     except AMinerAPIError as exc:
         result = {
             "workflow": args.mode, "query": {"direction": args.direction, "schools": schools},
-            "candidates": [], "warnings": warnings, "errors": [exc.to_dict()],
+            "candidates": [], "warnings": warnings, "errors": errors + [exc.to_dict()],
             "cost_estimate": estimate, "cost": client.cost.summary(),
         }
         write_result(result, args.output)
