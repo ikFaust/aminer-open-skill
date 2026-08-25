@@ -1,4 +1,0 @@
-interface:
-  display_name: "AMiner 院校与导师推荐"
-  short_description: "按研究方向发现院校，并基于 AMiner 证据推荐导师"
-  default_prompt: "使用 $aminer-advisor-recommender 按我的研究方向发现合适院校，并结合背景推荐导师。"

@@ -1,6 +1,10 @@
 ---
 name: aminer-advisor-recommender
-description: Discover Chinese institutions by research direction and recommend prospective advisors using AMiner evidence and an applicant profile. Use when a user asks which institutions are active in a direction; asks for advisors in a named university, school, or direction; filters by tiers such as 华五/985/211/双一流; compares publication-based academic or industry collaboration breadth; or wants heuristic reach/match/safer school and advisor suggestions based on undergraduate institution, grades, research, projects, publications, internships, degree target, and location preferences.
+version: 1.0.0
+author: AMiner
+contact: report@aminer.cn
+description: >
+  Discover Chinese institutions by research direction and recommend prospective advisors using AMiner evidence and an applicant profile. Use when a user asks which institutions are active in a direction; asks for advisors in a named university, school, or direction; filters by tiers such as 华五/985/211/双一流; compares publication-based academic or industry collaboration breadth; or wants heuristic reach/match/safer school and advisor suggestions based on undergraduate institution, grades, research, projects, publications, internships, degree target, and location preferences. Also triggers on Chinese requests such as 考研/保研/申博择校、推荐导师、找导师、选导师、某方向哪些学校强.
 ---
 
 # AMiner Advisor Recommender

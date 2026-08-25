@@ -366,13 +366,16 @@ def enrich_collaboration(
         for candidate in involved.values():
             for author in authors:
                 org_name = str(author.get("org") or "").strip()
-                org_id = str(author.get("orgid") or normalized_text(org_name))
+                # Authors without an orgid get a "name:" pseudo-key so they are never
+                # sent to org_detail as if the display name were an organization ID.
+                org_id = str(author.get("orgid") or "") or f"name:{normalized_text(org_name)}"
                 if not org_name or (candidate.org_id and org_id == candidate.org_id):
                     continue
                 candidate.collaboration_orgs[org_id] = org_name
 
     org_ids = list(dict.fromkeys(
-        org_id for candidate in candidates.values() for org_id in candidate.collaboration_orgs if org_id and " " not in org_id
+        org_id for candidate in candidates.values() for org_id in candidate.collaboration_orgs
+        if org_id and not org_id.startswith("name:")
     ))
     verified_types: dict[str, str] = {}
     if org_ids:
@@ -489,7 +492,7 @@ def applicant_readiness(profile: dict[str, Any]) -> float:
 
 def institution_level(name: str, tiers: dict[str, Any]) -> int:
     value = normalized_text(name)
-    for tier_name, level in (("985", 3), ("华五", 3), ("211", 2)):
+    for tier_name, level in (("985", 3), ("华五", 3), ("211", 2), ("双一流", 1)):
         if any(normalized_text(school) == value for school in tiers["tiers"].get(tier_name, {}).get("schools", [])):
             return level
     if any(term in value for term in ("二本", "普通本科", "省属")):
@@ -790,7 +793,10 @@ def main() -> None:
     warnings: list[str] = []
     if requested_school_count > len(schools):
         warnings.append(f"school cap omitted {requested_school_count - len(schools)} schools; provide a region or explicit list")
-    client = AMinerClient(os.getenv("AMINER_API_KEY", ""))
+    try:
+        client = AMinerClient(os.getenv("AMINER_API_KEY", ""))
+    except ValueError as exc:
+        raise SystemExit(f"{exc}; configure it with tools/setup-aminer-token before calling AMiner") from exc
     try:
         if args.mode == "discover":
             institutions = discover_institutions(client, args.direction, aliases, args.paper_limit, warnings)

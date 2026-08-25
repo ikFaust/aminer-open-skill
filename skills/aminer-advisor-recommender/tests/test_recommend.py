@@ -19,8 +19,10 @@ from recommend import (  # noqa: E402
     clean_paper,
     choose_profile_expansion_schools,
     discover_institutions,
+    enrich_collaboration,
     estimate_cost,
     filter_discipline_conflicts,
+    institution_level,
     mark_duplicate_names,
     recommend_for_school,
     resolve_people,
@@ -47,6 +49,7 @@ def tiers():
             "985": {"schools": ["清华大学"], "difficulty": 3},
             "华五": {"schools": [], "difficulty": 3},
             "211": {"schools": ["苏州大学"], "difficulty": 2},
+            "双一流": {"schools": ["清华大学", "苏州大学", "山西大学"], "difficulty": 1},
         }
     }
 
@@ -134,6 +137,30 @@ class RecommendationLogicTests(unittest.TestCase):
         self.assertEqual(set(result), {"p1", "p2"})
         self.assertTrue(first.identity_ambiguous)
         self.assertEqual(first.alternate_profile_ids, ["p2"])
+
+    def test_double_first_class_only_school_sits_between_ordinary_and_211(self):
+        self.assertEqual(institution_level("清华大学", tiers()), 3)
+        self.assertEqual(institution_level("苏州大学", tiers()), 2)
+        self.assertEqual(institution_level("山西大学", tiers()), 1)
+        self.assertEqual(institution_level("某省属二本院校", tiers()), 0)
+
+    def test_missing_orgid_authors_are_never_sent_to_paid_org_detail(self):
+        candidate = Candidate(person_id="p1", name="A", org_id="o1")
+        candidate.papers["x1"] = {"id": "x1", "title": "Computer Vision", "year": 2025,
+                                  "direction_term_match": True, "matched_terms": ["vision"]}
+        details = {"x1": {"id": "x1", "authors": [
+            {"name": "A", "org": "Target University", "orgid": "o1"},
+            {"name": "B", "org": "清华大学"},
+        ]}}
+
+        class NoOrgDetailClient:
+            def call(self, api, params):
+                raise AssertionError(f"unexpected paid call: {api}")
+
+        enrich_collaboration(NoOrgDetailClient(), {"p1": candidate}, details)
+        self.assertEqual(list(candidate.collaboration_orgs.values()), ["清华大学"])
+        self.assertTrue(next(iter(candidate.collaboration_orgs)).startswith("name:"))
+        self.assertEqual(candidate.collaboration_types[next(iter(candidate.collaboration_orgs))], "academic")
 
     def test_second_tier_to_985_is_reach(self):
         profile = {

@@ -11,3 +11,5 @@ Load machine-readable groups from `school-tiers.json`.
 “华五” is a conventional informal grouping: Fudan University, Shanghai Jiao Tong University, Nanjing University, Zhejiang University, and University of Science and Technology of China.
 
 The 985 and 211 labels describe historical projects. Preserve them because users commonly request these filters, but explain that current policy discussions often use 双一流 classifications instead.
+
+The 双一流 group uses the second-round (2022) list of 147 institutions: all 211 institutions (dual-campus entries listed separately), the 25 non-211 first-round discipline-construction institutions, and the 7 institutions added in the second round. It is a heterogeneous group — members that are also 985/211 keep their higher level for banding, and 双一流-only members sit between ordinary undergraduate institutions and 211.
