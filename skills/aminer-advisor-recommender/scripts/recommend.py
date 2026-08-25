@@ -513,8 +513,17 @@ def institution_level(name: str, tiers: dict[str, Any]) -> int:
     for tier_name, level in (("985", 3), ("华五", 3), ("211", 2), ("双一流", 1)):
         if any(normalized_text(school) == value for school in tiers["tiers"].get(tier_name, {}).get("schools", [])):
             return level
-    if any(term in value for term in ("二本", "普通本科", "省属")):
-        return 0
+    # Applicants often describe their institution generically ("某211大学",
+    # "双非一本院校") instead of naming it; read the tier phrase instead of
+    # collapsing everything unmatched to the lowest level.
+    if "双非" in value or "非985" in value or "非211" in value:
+        return 1 if "一本" in value else 0
+    if "985" in value or "华五" in value:
+        return 3
+    if "211" in value:
+        return 2
+    if "双一流" in value or "一本" in value:
+        return 1
     # Do not silently promote an unlisted institution above an ordinary undergraduate
     # institution. Strong non-211 institutions can be supplied in an explicit tier later.
     return 0

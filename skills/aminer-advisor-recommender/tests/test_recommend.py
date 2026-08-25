@@ -145,6 +145,14 @@ class RecommendationLogicTests(unittest.TestCase):
         self.assertEqual(institution_level("山西大学", tiers()), 1)
         self.assertEqual(institution_level("某省属二本院校", tiers()), 0)
 
+    def test_generic_tier_phrases_are_recognized(self):
+        self.assertEqual(institution_level("某211大学", tiers()), 2)
+        self.assertEqual(institution_level("华东某985高校", tiers()), 3)
+        self.assertEqual(institution_level("某双一流高校", tiers()), 1)
+        self.assertEqual(institution_level("双非一本院校", tiers()), 1)
+        self.assertEqual(institution_level("双非院校", tiers()), 0)
+        self.assertEqual(institution_level("普通本科院校", tiers()), 0)
+
     def test_missing_orgid_authors_are_never_sent_to_paid_org_detail(self):
         candidate = Candidate(person_id="p1", name="A", org_id="o1")
         candidate.papers["x1"] = {"id": "x1", "title": "Computer Vision", "year": 2025,
