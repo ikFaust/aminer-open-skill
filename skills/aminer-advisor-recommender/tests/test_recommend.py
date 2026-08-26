@@ -15,6 +15,7 @@ from recommend import (  # noqa: E402
     ResolvedOrganization,
     applicant_readiness,
     assign_bands,
+    build_rank_key,
     classify_org,
     clean_paper,
     choose_profile_expansion_schools,
@@ -144,6 +145,26 @@ class RecommendationLogicTests(unittest.TestCase):
         self.assertEqual(institution_level("苏州大学", tiers()), 2)
         self.assertEqual(institution_level("山西大学", tiers()), 1)
         self.assertEqual(institution_level("某省属二本院校", tiers()), 0)
+
+    def test_rank_by_rising_prefers_smaller_citation_base(self):
+        def with_papers(person_id, n_citation, count, year):
+            candidate = Candidate(person_id=person_id, name=person_id, n_citation=n_citation)
+            candidate.papers = {f"{person_id}{i}": {"id": f"{person_id}{i}", "title": "T", "year": year,
+                                                    "direction_term_match": True} for i in range(count)}
+            candidate.scores = {"overall": 60.0}
+            return candidate
+
+        mega_pi = with_papers("mega", 80000, 5, 2026)
+        early_career = with_papers("young", 800, 3, 2026)
+        stale = with_papers("stale", 100, 3, 2015)
+        key = build_rank_key("named", "all", "rising")
+        ranked = sorted([mega_pi, early_career, stale], key=key, reverse=True)
+        self.assertEqual([c.person_id for c in ranked], ["young", "mega", "stale"])
+
+        by_citation = sorted([mega_pi, early_career], key=build_rank_key("named", "all", "citation"), reverse=True)
+        self.assertEqual(by_citation[0].person_id, "mega")
+        by_recent = sorted([early_career, stale], key=build_rank_key("named", "all", "recent"), reverse=True)
+        self.assertEqual(by_recent[0].person_id, "young")
 
     def test_generic_tier_phrases_are_recognized(self):
         self.assertEqual(institution_level("某211大学", tiers()), 2)

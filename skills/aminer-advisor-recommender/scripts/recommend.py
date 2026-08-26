@@ -585,6 +585,31 @@ def select_profile_portfolio(candidates: list[Candidate], limit: int) -> list[Ca
     return selected[:limit]
 
 
+def build_rank_key(mode: str, collaboration_type: str, rank_by: str):
+    """Return a sort key for the requested ranking dimension (used with reverse=True)."""
+    def rank_key(candidate: Candidate) -> tuple[float, ...]:
+        overall = float(candidate.scores.get("overall") or 0)
+        if mode == "collaboration":
+            count = len(candidate.collaboration_orgs) if collaboration_type == "all" else sum(
+                value == collaboration_type for value in candidate.collaboration_types.values()
+            )
+            return (float(count), overall)
+        years = [int(paper["year"]) for paper in candidate.papers.values()]
+        if rank_by == "citation":
+            return (float(candidate.n_citation or 0), overall)
+        if rank_by == "recent":
+            recent = sum(1 for year in years if year >= CURRENT_YEAR - 3)
+            return (float(recent), float(max(years, default=0)), overall)
+        if rank_by == "rising":
+            # Heuristic rising-star view: require recent direction evidence (capped so a
+            # high-volume established PI cannot win on count alone), then prefer the
+            # smaller citation base — established PIs rank below earlier-career scholars.
+            recent = min(3, sum(1 for year in years if year >= CURRENT_YEAR - 3))
+            return (float(recent), float(max(years, default=0)), -float(candidate.n_citation or 0))
+        return (overall, float(len(candidate.papers)))
+    return rank_key
+
+
 def estimate_cost(
     mode: str, school_count: int, alias_count: int, paper_limit: int, verify_roles: int,
     profile_discovery: bool = False,
@@ -755,6 +780,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-schools", type=int, default=5)
     parser.add_argument("--max-author-lookups", type=int, default=30)
     parser.add_argument("--collaboration-type", choices=("all", "academic", "industry"), default="all")
+    parser.add_argument(
+        "--rank-by", choices=("overall", "citation", "recent", "rising"), default="overall",
+        help="Ranking dimension: overall score, total citations, recent activity, or heuristic rising stars",
+    )
     parser.add_argument("--allow-name-fallback", action="store_true")
     parser.add_argument("--allow-cross-discipline", action="store_true")
     parser.add_argument("--verify-roles", type=int, default=0, help="Paid person_detail calls for top N candidates")
@@ -898,14 +927,7 @@ def main() -> None:
         if profile:
             assign_bands(all_candidates, profile, tiers)
 
-        def rank_key(candidate: Candidate) -> tuple[float, float]:
-            if args.mode == "collaboration":
-                count = len(candidate.collaboration_orgs) if args.collaboration_type == "all" else sum(
-                    value == args.collaboration_type for value in candidate.collaboration_types.values()
-                )
-                return float(count), float(candidate.scores.get("overall") or 0)
-            return float(candidate.scores.get("overall") or 0), float(len(candidate.papers))
-
+        rank_key = build_rank_key(args.mode, args.collaboration_type, args.rank_by)
         all_ranked = sorted(all_candidates.values(), key=rank_key, reverse=True)
         ranked = (
             select_profile_portfolio(all_ranked, args.candidate_limit)
@@ -914,10 +936,22 @@ def main() -> None:
         portfolio_band_counts = dict(Counter(
             candidate.recommendation_band for candidate in ranked if candidate.recommendation_band
         ))
+        method_notes = [
+            "Only authors whose paper affiliation matches the resolved organization ID are considered by default.",
+            "Every candidate has at least one non-empty, dated, direction-matched paper evidence item.",
+            "Advisor role and current recruitment require official verification unless a role is explicitly returned.",
+            "Reach/match/safer labels are heuristic bands, not admission probabilities.",
+        ]
+        if args.rank_by == "rising":
+            method_notes.append(
+                "Rising ranking is a heuristic (recent direction evidence plus a smaller citation base), "
+                "not an official rising-star index; verify seniority on the official profile page."
+            )
         result = {
             "workflow": args.mode,
             "query": {"direction": args.direction, "aliases": aliases, "schools": schools,
                       "department": args.department or None, "tier": tier_name or None,
+                      "rank_by": args.rank_by,
                       "collaboration_type": args.collaboration_type if args.mode == "collaboration" else None},
             "resolved_organizations": {
                 school: ({"id": org.org_id, "canonical_name": org.canonical_name} if org else None)
@@ -936,12 +970,7 @@ def main() -> None:
                 "suggestions": ["try English/official organization names", "add direction aliases", "use --mode discover"]
                 if not ranked else []
             },
-            "method_notes": [
-                "Only authors whose paper affiliation matches the resolved organization ID are considered by default.",
-                "Every candidate has at least one non-empty, dated, direction-matched paper evidence item.",
-                "Advisor role and current recruitment require official verification unless a role is explicitly returned.",
-                "Reach/match/safer labels are heuristic bands, not admission probabilities.",
-            ],
+            "method_notes": method_notes,
         }
         write_result(result, args.output)
     except AMinerAPIError as exc:

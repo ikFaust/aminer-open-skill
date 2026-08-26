@@ -121,6 +121,7 @@ By default, profile mode uses AMiner direction evidence to add lower-tier instit
 - `--schools`: comma-separated explicit override for a tier.
 - `--verify-roles N`: call paid `person_detail` for up to N shortlisted candidates per school; default 0.
 - `--max-cost`: reject a worst-case estimate at or above this amount; default ¥5.00.
+- `--rank-by`: ranking dimension — `overall` (default), `citation` (established high-citation PIs), `recent` (most recent direction activity), `rising` (heuristic rising stars: recent direction evidence with a smaller citation base).
 - `--yes`: proceed above `--max-cost` only after the user explicitly confirms the estimate.
 - `--allow-name-fallback` and `--allow-cross-discipline`: relax identity or discipline filters only when the user accepts the added noise.
 - `--no-auto-expand-profile`: disable the default cross-tier school expansion for a closed-list comparison.
@@ -132,6 +133,7 @@ The script estimates worst-case cost before any API call and returns the success
 Apply the rubric in `references/scoring-rubric.md`. Keep raw evidence separate from derived scores.
 
 - Use school tiers only as filters or user preferences, not as a universal quality ranking.
+- Default ranking favors established high-citation scholars, whose supervision capacity is often limited. When the user asks for young advisors, rising stars, or alternatives to famous PIs — or when every top row is a mega-cited PI — rerun or re-rank with `--rank-by rising` (or `recent`) and present both views. Label the rising view as a heuristic, not an official rising-star index.
 - Label reach/match/safer classifications as heuristic fit bands, never admission probabilities.
 - Do not penalize missing data as if it were negative evidence. Mark the component `unknown` and lower confidence.
 - Explain every score with observable evidence.
