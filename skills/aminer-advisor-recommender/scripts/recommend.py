@@ -43,6 +43,18 @@ def normalized_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
 
 
+def normalized_person_name(value: Any) -> str:
+    """Canonicalize a person name: paper bylines use \"Last, First\" while AMiner
+    profiles use \"First Last\" — fold both to the same key."""
+    name = normalized_text(value)
+    if "," in name:
+        last, _, first = name.partition(",")
+        last, first = last.strip(), first.strip()
+        if first and last:
+            name = f"{first} {last}"
+    return name.replace(",", " ").replace("  ", " ").strip()
+
+
 def tokens(text: str) -> set[str]:
     value = normalized_text(text)
     latin = set(re.findall(r"[a-z][a-z0-9+.-]{1,}", value))
@@ -220,6 +232,7 @@ def resolve_people(
     warnings: list[str],
 ) -> dict[str, Candidate]:
     paper_by_id = {str(row.get("id")): row for row in papers if row.get("id")}
+    school_names = [name for name in (organization.canonical_name, organization.query, *organization.aliases) if name]
     author_papers: dict[str, list[dict[str, Any]]] = defaultdict(list)
     author_affiliations: dict[str, set[str]] = defaultdict(set)
     author_org_ids: dict[str, set[str]] = defaultdict(set)
@@ -239,11 +252,14 @@ def resolve_people(
             if not name:
                 continue
             exact_org = bool(org_id and org_id == organization.org_id)
-            fallback_org = bool(not org_id and contains_any(org_name, [organization.canonical_name, organization.query]))
-            if not exact_org and not (allow_name_fallback and fallback_org):
+            # Paper authors are usually signed with a department-level orgid that differs
+            # from the school-level ID; accept an affiliation whose text names the school.
+            # Identity is still resolved through the org_id-constrained person_search below.
+            text_org = contains_any(org_name, school_names)
+            if not exact_org and not text_org:
                 skipped_without_org += 1
                 continue
-            key = normalized_text(name)
+            key = normalized_person_name(name)
             author_papers[key].append(evidence)
             if org_name:
                 author_affiliations[key].add(org_name)
@@ -267,15 +283,36 @@ def resolve_people(
             str(author.get("name"))
             for detail in details.values()
             for author in detail.get("authors") or []
-            if isinstance(author, dict) and normalized_text(author.get("name")) == author_key
+            if isinstance(author, dict) and normalized_person_name(author.get("name")) == author_key
         )
+        query_name = display_name
+        if "," in query_name:
+            last, _, first = query_name.partition(",")
+            if first.strip() and last.strip():
+                query_name = f"{first.strip()} {last.strip()}"
         people = unwrap(
-            client.call("person_search", {"name": display_name, "org_id": [organization.org_id], "size": 10})
+            client.call("person_search", {"name": query_name, "org_id": [organization.org_id], "size": 10})
         )
-        org_people = [row for row in people if str(row.get("org_id") or "") == organization.org_id]
+        # Person profiles carry department-level org_ids too; accept a profile whose
+        # organization text names the school when the ID does not match exactly.
+        def school_profile_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [
+                row for row in rows
+                if str(row.get("org_id") or "") == organization.org_id
+                or contains_any(f"{row.get('org')} {row.get('org_zh')}", school_names)
+            ]
+
+        org_people = school_profile_rows(people)
+        if not org_people:
+            # The server-side school-level org_id filter excludes department-level
+            # profiles entirely; retry by organization text (person_search is free).
+            people = unwrap(
+                client.call("person_search", {"name": query_name, "org": organization.canonical_name, "size": 10})
+            )
+            org_people = school_profile_rows(people)
         exact_people = [
             row for row in org_people
-            if author_key in (normalized_text(row.get("name")), normalized_text(row.get("name_zh")))
+            if author_key in (normalized_person_name(row.get("name")), normalized_person_name(row.get("name_zh")))
         ]
         resolution = "org_constrained_exact_name"
         if not exact_people and allow_name_fallback:
@@ -356,12 +393,12 @@ def enrich_collaboration(
     for candidate in candidates.values():
         for name in (candidate.name, candidate.name_zh):
             if name:
-                candidate_names[normalized_text(name)].append(candidate)
+                candidate_names[normalized_person_name(name)].append(candidate)
     for detail in details.values():
         authors = [row for row in detail.get("authors") or [] if isinstance(row, dict)]
         involved: dict[str, Candidate] = {}
         for author in authors:
-            for candidate in candidate_names.get(normalized_text(author.get("name")), []):
+            for candidate in candidate_names.get(normalized_person_name(author.get("name")), []):
                 if detail.get("id") in candidate.papers:
                     involved[candidate.person_id] = candidate
         for candidate in involved.values():
@@ -509,7 +546,14 @@ def applicant_readiness(profile: dict[str, Any]) -> float:
 
 
 def institution_level(name: str, tiers: dict[str, Any]) -> int:
-    value = normalized_text(name)
+    value = normalized_text(name).replace("’", "'")
+    # Map well-known English school names to the Chinese tier-list entries; AMiner
+    # canonical names are often English and org_search aliases are not guaranteed
+    # to include the Chinese name.
+    for english, chinese in (tiers.get("english_names") or {}).items():
+        if normalized_text(english).replace("’", "'") == value:
+            value = normalized_text(chinese)
+            break
     for tier_name, level in (("985", 3), ("华五", 3), ("211", 2), ("双一流", 1)):
         if any(normalized_text(school) == value for school in tiers["tiers"].get(tier_name, {}).get("schools", [])):
             return level
@@ -533,11 +577,32 @@ def school_difficulty(school: str, tiers: dict[str, Any]) -> int:
     return institution_level(school, tiers)
 
 
-def assign_bands(candidates: dict[str, Candidate], profile: dict[str, Any], tiers: dict[str, Any]) -> None:
+def school_level_map(
+    schools: Iterable[str], organization_cache: dict[str, ResolvedOrganization | None], tiers: dict[str, Any]
+) -> dict[str, int]:
+    """Level each queried school using every resolved name variant (English canonical,
+    Chinese aliases), so an English school name still matches the Chinese tier lists."""
+    levels: dict[str, int] = {}
+    for school in schools:
+        names = {school}
+        organization = organization_cache.get(school)
+        if organization:
+            names.update([organization.canonical_name, *organization.aliases])
+        levels[school] = max(institution_level(name, tiers) for name in names if name)
+    return levels
+
+
+def assign_bands(
+    candidates: dict[str, Candidate], profile: dict[str, Any], tiers: dict[str, Any],
+    school_levels: dict[str, int] | None = None,
+) -> None:
     readiness = applicant_readiness(profile)
     undergraduate_level = institution_level(str(profile.get("undergraduate_institution") or ""), tiers)
+    levels = school_levels or {}
     for candidate in candidates.values():
-        target_level = max([school_difficulty(school, tiers) for school in candidate.source_schools] or [2])
+        target_level = max(
+            [levels.get(school, school_difficulty(school, tiers)) for school in candidate.source_schools] or [2]
+        )
         threshold = {3: 82.0, 2: 72.0, 1: 62.0, 0: 55.0}[target_level]
         gap_penalty = max(0, target_level - undergraduate_level) * 7.0
         fit_adjustment = (float(candidate.scores.get("applicant_experience_fit") or 40.0) - 50.0) * 0.15
@@ -553,7 +618,7 @@ def assign_bands(candidates: dict[str, Candidate], profile: dict[str, Any], tier
 def mark_duplicate_names(candidates: dict[str, Candidate]) -> dict[str, Candidate]:
     groups: dict[tuple[str, tuple[str, ...]], list[Candidate]] = defaultdict(list)
     for candidate in candidates.values():
-        groups[(normalized_text(candidate.display_name), tuple(sorted(candidate.source_schools)))].append(candidate)
+        groups[(normalized_person_name(candidate.display_name), tuple(sorted(candidate.source_schools)))].append(candidate)
     for rows in groups.values():
         if len(rows) <= 1:
             continue
@@ -638,6 +703,46 @@ def estimate_cost(
     }
 
 
+DEPARTMENT_SEGMENT = re.compile(
+    r"^(school|department|dept\.?|faculty|institute|college|laboratory|lab|key lab|center|centre|research)\b",
+    re.IGNORECASE,
+)
+
+
+def extract_institution_name(affiliation: str) -> str:
+    """Reduce a paper-affiliation string to its university main body.
+
+    "School of CS, Beijing Technology and Business University, Beijing, PR China"
+    -> "Beijing Technology and Business University".
+    """
+    text = str(affiliation or "").strip()
+    match = re.search(r"[一-鿿]{2,14}(?:大学|学院)", text)
+    if match:
+        return match.group(0)
+    for segment in re.split(r"[,;]", text):
+        segment = segment.strip()
+        if not segment or DEPARTMENT_SEGMENT.match(segment):
+            continue
+        if re.search(r"\b(university|institute of technology|academy of sciences)\b", segment, re.IGNORECASE):
+            return segment
+    return text
+
+
+def is_mainland_china_institution(affiliation: str) -> bool:
+    """Heuristic mainland filter on the raw paper-affiliation string.
+
+    AMiner also returns Chinese aliases for overseas organizations, so resolved
+    aliases must not be used as a domestic signal.
+    """
+    text = str(affiliation or "")
+    lowered = normalized_text(text)
+    if any(term in lowered for term in ("hong kong", "macau", "macao", "taiwan", "香港", "澳门", "台湾")):
+        return False
+    if re.search(r"[一-鿿]", text):
+        return True
+    return re.search(r"\bchina\b", lowered) is not None
+
+
 def choose_profile_expansion_schools(
     profile: dict[str, Any], current: list[str], institutions: list[dict[str, Any]],
     tiers: dict[str, Any], limit: int,
@@ -650,16 +755,22 @@ def choose_profile_expansion_schools(
     hardest_target = max([school_difficulty(school, tiers) for school in current] or [undergraduate_level + 1])
     eligible: list[tuple[int, int, str]] = []
     for index, row in enumerate(institutions):
-        name = str(row.get("organization") or "").strip()
+        name = str(row.get("organization_main") or row.get("organization") or "").strip()
         aliases = [str(value) for value in row.get("organization_aliases") or []]
+        if not aliases:
+            continue  # never add a school AMiner could not resolve to an organization
         identity_names = [name, *aliases]
         if not name or any(normalized_text(value) in existing for value in identity_names):
+            continue
+        level = max(school_difficulty(value, tiers) for value in identity_names)
+        # Domestic signal: the raw affiliation names mainland China, or the school
+        # matches a known tier list (covers resolved names without a country marker).
+        if level == 0 and not is_mainland_china_institution(str(row.get("organization") or "")):
             continue
         if classify_org(" ".join(identity_names)) != "academic":
             continue
         if not contains_any(" ".join(identity_names), ("university", "college", "大学", "学院")):
             continue
-        level = max(school_difficulty(value, tiers) for value in identity_names)
         if level >= hardest_target and current:
             continue
         eligible.append((level, index, name))
@@ -874,7 +985,9 @@ def main() -> None:
                     f"profile expansion inspected {len(inspected)} of {len(discovered)} discovered organizations"
                 )
             for row in inspected:
-                resolved = resolve_organization(client, str(row.get("organization") or ""))
+                main_body = extract_institution_name(str(row.get("organization") or ""))
+                row["organization_main"] = main_body
+                resolved = resolve_organization(client, main_body) if main_body else None
                 if resolved:
                     row["organization_aliases"] = [resolved.canonical_name, *resolved.aliases]
             auto_added_schools = choose_profile_expansion_schools(
@@ -925,7 +1038,7 @@ def main() -> None:
 
         all_candidates = mark_duplicate_names(all_candidates)
         if profile:
-            assign_bands(all_candidates, profile, tiers)
+            assign_bands(all_candidates, profile, tiers, school_level_map(schools, organization_cache, tiers))
 
         rank_key = build_rank_key(args.mode, args.collaboration_type, args.rank_by)
         all_ranked = sorted(all_candidates.values(), key=rank_key, reverse=True)

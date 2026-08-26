@@ -22,13 +22,16 @@ from recommend import (  # noqa: E402
     discover_institutions,
     enrich_collaboration,
     estimate_cost,
+    extract_institution_name,
     filter_discipline_conflicts,
     institution_level,
+    is_mainland_china_institution,
     mark_duplicate_names,
     recommend_for_school,
     resolve_people,
     score_candidates,
     select_profile_portfolio,
+    school_level_map,
     verify_candidate_roles,
 )
 
@@ -47,6 +50,7 @@ class FakeClient:
 
 def tiers():
     return {
+        "english_names": {"Tsinghua University": "清华大学"},
         "tiers": {
             "985": {"schools": ["清华大学"], "difficulty": 3},
             "华五": {"schools": [], "difficulty": 3},
@@ -166,6 +170,94 @@ class RecommendationLogicTests(unittest.TestCase):
         by_recent = sorted([early_career, stale], key=build_rank_key("named", "all", "recent"), reverse=True)
         self.assertEqual(by_recent[0].person_id, "young")
 
+    def test_affiliation_string_reduces_to_university_main_body(self):
+        self.assertEqual(
+            extract_institution_name("School of CS, Beijing Technology and Business University, Beijing, PR China"),
+            "Beijing Technology and Business University",
+        )
+        self.assertEqual(
+            extract_institution_name("Institute of Digital Civilization, University of Shanghai for Science and Technology, Shanghai, China"),
+            "University of Shanghai for Science and Technology",
+        )
+        self.assertEqual(extract_institution_name("清华大学计算机系智能技术与系统国家重点实验室"), "清华大学")
+
+    def test_overseas_and_unresolved_institutions_are_not_auto_added(self):
+        profile = {"undergraduate_institution": "某省属二本院校"}
+        institutions = [
+            {"organization": "Department of Mechanical Engineering, Chalmers University of Technology, Gothenburg, Sweden",
+             "organization_main": "Chalmers University of Technology",
+             "organization_aliases": ["Chalmers University of Technology"], "matched_paper_count": 4},
+            {"organization": "Dept of CSE(AI), KIET (Deemed to Be University), Ghaziabad, U.P., India",
+             "organization_main": "KIET (Deemed to Be University)",
+             "organization_aliases": ["KIET University"], "matched_paper_count": 3},
+            {"organization": "School of CS, Some Unresolvable University, Beijing, PR China",
+             "organization_main": "Some Unresolvable University", "matched_paper_count": 3},
+            {"organization": "School of CS, Example Provincial University, Nanchang, PR China",
+             "organization_main": "Example Provincial University",
+             "organization_aliases": ["Example Provincial University", "某省属大学"], "matched_paper_count": 2},
+        ]
+        result = choose_profile_expansion_schools(profile, ["清华大学"], institutions, tiers(), limit=4)
+        self.assertEqual(result, ["Example Provincial University"])
+
+    def test_department_level_orgid_author_is_accepted_by_school_text(self):
+        papers = [{"id": "p1", "title": "Computer Vision", "year": 2025}]
+        details = {"p1": {"id": "p1", "title": "Computer Vision", "year": 2025,
+                          "authors": [{"name": "Dept Author",
+                                       "org": "Department of Automation, Tsinghua University",
+                                       "orgid": "dept-9"}]}}
+        people = [{"id": "a1", "name": "Dept Author", "org": "Tsinghua University", "org_id": "org-1"}]
+        result = resolve_people(
+            FakeClient(people), papers, details,
+            ResolvedOrganization("清华大学", "org-1", "Tsinghua University", ["清华大学"]),
+            ["vision"], 10, False, [],
+        )
+        self.assertEqual(set(result), {"a1"})
+
+    def test_department_profile_found_via_org_text_retry(self):
+        papers = [{"id": "p1", "title": "Computer Vision", "year": 2025}]
+        details = {"p1": {"id": "p1", "title": "Computer Vision", "year": 2025,
+                          "authors": [{"name": "Dept Author",
+                                       "org": "Department of Automation, Tsinghua University",
+                                       "orgid": "dept-9"}]}}
+
+        class DeptClient:
+            def __init__(self):
+                self.calls = []
+
+            def call(self, api, params):
+                self.calls.append((api, params))
+                assert api == "person_search"
+                if "org_id" in params:
+                    return {"success": True, "data": []}  # server-side school-ID filter excludes dept profiles
+                return {"success": True, "data": [
+                    {"id": "a1", "name": "Dept Author",
+                     "org": "Department of Automation, Tsinghua University", "org_id": "dept-9"},
+                ]}
+
+        client = DeptClient()
+        result = resolve_people(
+            client, papers, details,
+            ResolvedOrganization("清华大学", "org-1", "Tsinghua University", ["清华大学"]),
+            ["vision"], 10, False, [],
+        )
+        self.assertEqual(set(result), {"a1"})
+        self.assertEqual(client.calls[1][1].get("org"), "Tsinghua University")
+
+    def test_english_school_name_levels_through_resolved_aliases(self):
+        # Via the english_names map even when org_search aliases lack the Chinese name
+        self.assertEqual(institution_level("Tsinghua University", tiers()), 3)
+        cache = {"Tsinghua University": ResolvedOrganization(
+            "Tsinghua University", "org-thu", "Tsinghua University", [])}
+        levels = school_level_map(["Tsinghua University"], cache, tiers())
+        self.assertEqual(levels["Tsinghua University"], 3)
+        profile = {"undergraduate_institution": "某211大学", "gpa": 3.6, "gpa_scale": 4.0,
+                   "rank_percentile": 15, "research_projects": [{}, {}], "publications": [],
+                   "internships": [{}]}
+        candidate = Candidate(person_id="p1", name="A", source_schools={"Tsinghua University"})
+        candidate.scores = {"applicant_experience_fit": 50.0}
+        assign_bands({"p1": candidate}, profile, tiers(), levels)
+        self.assertEqual(candidate.recommendation_band, "冲刺（启发式）")
+
     def test_generic_tier_phrases_are_recognized(self):
         self.assertEqual(institution_level("某211大学", tiers()), 2)
         self.assertEqual(institution_level("华东某985高校", tiers()), 3)
@@ -237,9 +329,11 @@ class RecommendationLogicTests(unittest.TestCase):
     def test_profile_expansion_adds_direction_evidenced_lower_tier_school(self):
         profile = {"undergraduate_institution": "某省属二本院校"}
         institutions = [
-            {"organization": "Tsinghua University", "organization_aliases": ["清华大学"], "matched_paper_count": 3},
-            {"organization": "Example Provincial University", "organization_aliases": ["某省属大学"],
-             "matched_paper_count": 2},
+            {"organization": "Tsinghua University, Beijing, China", "organization_main": "Tsinghua University",
+             "organization_aliases": ["清华大学"], "matched_paper_count": 3},
+            {"organization": "Example Provincial University, Nanchang, China",
+             "organization_main": "Example Provincial University",
+             "organization_aliases": ["某省属大学"], "matched_paper_count": 2},
             {"organization": "Example Robotics Company", "matched_paper_count": 4},
         ]
         result = choose_profile_expansion_schools(
