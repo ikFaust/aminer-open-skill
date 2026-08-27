@@ -14,6 +14,7 @@ from recommend import (  # noqa: E402
     Candidate,
     ResolvedOrganization,
     applicant_readiness,
+    assess_recent_hire,
     assign_bands,
     build_rank_key,
     classify_org,
@@ -32,6 +33,7 @@ from recommend import (  # noqa: E402
     score_candidates,
     select_profile_portfolio,
     school_level_map,
+    screen_recent_hires,
     verify_candidate_roles,
 )
 
@@ -257,6 +259,40 @@ class RecommendationLogicTests(unittest.TestCase):
         candidate.scores = {"applicant_experience_fit": 50.0}
         assign_bands({"p1": candidate}, profile, tiers(), levels)
         self.assertEqual(candidate.recommendation_band, "冲刺（启发式）")
+
+    def test_recent_hire_needs_positive_evidence(self):
+        # 张静式 bad case：资深教授、无任何入职信息 → 不得断言为新引进
+        senior = {"position_zh": "教授", "bio_zh": "长期从事知识图谱研究。", "edu_zh": "2005年 清华大学 博士"}
+        self.assertEqual(assess_recent_hire(senior, 2020)["status"], "no_hire_evidence")
+        # bio 明确写了窗口内入职年份
+        joined = {"position_zh": "教授", "bio_zh": "2023年9月加入中国人民大学信息学院。"}
+        self.assertEqual(assess_recent_hire(joined, 2020)["status"], "likely_recent")
+        # bio 写的入职年份在窗口之前 → 明确排除
+        earlier = {"position_zh": "副教授", "bio_zh": "2018年入职本校。"}
+        result = assess_recent_hire(earlier, 2020)
+        self.assertEqual(result["status"], "hired_earlier")
+        self.assertIn("2018", result["signals"][0])
+        # 博士新毕业 → 正信号
+        fresh = {"position_zh": "", "edu_zh": "2024年 浙江大学获得计算机博士学位"}
+        self.assertEqual(assess_recent_hire(fresh, 2020)["status"], "likely_recent")
+        # 初级职称 → 正信号
+        junior = {"position_zh": "助理教授", "edu_zh": ""}
+        self.assertEqual(assess_recent_hire(junior, 2020)["status"], "likely_recent")
+
+    def test_recent_hire_screening_excludes_students_and_unevidenced(self):
+        junior = Candidate(person_id="a", name="Junior Prof", role="助理教授")
+        junior.hire_assessment = {"status": "likely_recent", "signals": ["junior position: 助理教授"]}
+        phd = Candidate(person_id="b", name="Phd Student", role="博士生")
+        phd.hire_assessment = {"status": "likely_recent", "signals": ["latest degree year 2027"]}
+        senior = Candidate(person_id="c", name="Senior Prof", role="教授")
+        senior.hire_assessment = {"status": "no_hire_evidence", "signals": []}
+        earlier = Candidate(person_id="d", name="Old Hire", role="副教授")
+        earlier.hire_assessment = {"status": "hired_earlier", "signals": ["bio states joining in 2018, before 2020"]}
+        pool, screening = screen_recent_hires([junior, phd, senior, earlier], 2020)
+        self.assertEqual([c.person_id for c in pool], ["a"])
+        self.assertEqual(screening["excluded_non_faculty"][0]["name"], "Phd Student")
+        self.assertEqual(screening["no_hire_evidence"][0]["name"], "Senior Prof")
+        self.assertEqual(screening["excluded_hired_earlier"][0]["name"], "Old Hire")
 
     def test_generic_tier_phrases_are_recognized(self):
         self.assertEqual(institution_level("某211大学", tiers()), 2)

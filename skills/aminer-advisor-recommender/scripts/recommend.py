@@ -26,6 +26,13 @@ FACULTY_TERMS = (
     "教授", "副教授", "研究员", "副研究员", "博导", "博士生导师", "硕导", "硕士生导师",
 )
 NON_FACULTY_TERMS = ("student", "phd candidate", "postdoc", "postdoctoral", "学生", "博士生", "硕士生", "博士后")
+JUNIOR_POSITION_TERMS = (
+    "assistant professor", "lecturer", "tenure-track", "助理教授", "助理研究员", "讲师", "准聘", "特聘研究员",
+)
+HIRE_YEAR_PATTERNS = (
+    re.compile(r"(20\d{2})\s*年(?:\s*\d{1,2}\s*月)?[^。；;]{0,12}?(?:加入|入职|受聘|任教)"),
+    re.compile(r"(?:joined|joining)[^.;]{0,60}?in\s+(20\d{2})", re.IGNORECASE),
+)
 COMPUTING_DIRECTION_TERMS = (
     "machine learning", "deep learning", "computer vision", "natural language", "large language model",
     "artificial intelligence", "robot", "embodied", "机器学习", "深度学习", "计算机视觉", "自然语言",
@@ -110,6 +117,7 @@ class Candidate:
     identity_resolution: str = "org_constrained_name"
     role: str | None = None
     role_unverified: bool = True
+    hire_assessment: dict[str, Any] | None = None
 
     @property
     def display_name(self) -> str:
@@ -135,6 +143,7 @@ class Candidate:
             "identity_resolution": self.identity_resolution,
             "role": self.role,
             "role_unverified": self.role_unverified,
+            "hire_assessment": self.hire_assessment,
             "interests": self.interests,
             "n_citation": self.n_citation,
             "evidence_papers": list(self.papers.values()),
@@ -501,7 +510,39 @@ def filter_discipline_conflicts(
     return kept
 
 
-def verify_candidate_roles(client: AMinerClient, candidates: dict[str, Candidate], limit: int, warnings: list[str]) -> None:
+def assess_recent_hire(profile_row: dict[str, Any], since: int) -> dict[str, Any]:
+    """Classify hire recency from AMiner profile signals.
+
+    AMiner has no hire-date field, so this never asserts a new hire without
+    positive evidence: an explicit join year in the bio, a fresh doctorate,
+    or a junior title. Established scholars hired recently are undetectable
+    and stay in no_hire_evidence.
+    """
+    bio = " ".join(str(profile_row.get(key) or "") for key in ("bio_zh", "bio"))
+    edu = " ".join(str(profile_row.get(key) or "") for key in ("edu_zh", "edu"))
+    position = str(profile_row.get("position_zh") or profile_row.get("position") or "").strip()
+    signals: list[str] = []
+
+    join_years = [int(m.group(1)) for pattern in HIRE_YEAR_PATTERNS for m in pattern.finditer(bio)]
+    if join_years:
+        year = max(join_years)
+        if year >= since:
+            return {"status": "likely_recent", "signals": [f"bio states joining in {year}"]}
+        return {"status": "hired_earlier", "signals": [f"bio states joining in {year}, before {since}"]}
+
+    degree_years = [int(y) for y in re.findall(r"(?:19|20)\d{2}", edu)]
+    if degree_years and max(degree_years) >= since - 1:
+        signals.append(f"latest degree year {max(degree_years)}")
+    if position and contains_any(position, JUNIOR_POSITION_TERMS):
+        signals.append(f"junior position: {position}")
+    if signals:
+        return {"status": "likely_recent", "signals": signals}
+    return {"status": "no_hire_evidence", "signals": []}
+
+
+def verify_candidate_roles(
+    client: AMinerClient, candidates: dict[str, Candidate], limit: int, warnings: list[str], hired_since: int = 0
+) -> None:
     ranked = sorted(candidates.values(), key=lambda row: (len(row.papers), row.n_citation or 0), reverse=True)[:limit]
     for candidate in ranked:
         if candidate.person_id.startswith("unresolved:"):
@@ -520,6 +561,8 @@ def verify_candidate_roles(client: AMinerClient, candidates: dict[str, Candidate
         row = rows[0]
         role = str(row.get("position_zh") or row.get("position") or "").strip()
         candidate.role = role or None
+        if hired_since:
+            candidate.hire_assessment = assess_recent_hire(row, hired_since)
         if role and contains_any(role, NON_FACULTY_TERMS):
             candidate.role_unverified = True
             candidate.scores["role_conflict"] = 1.0
@@ -648,6 +691,43 @@ def select_profile_portfolio(candidates: list[Candidate], limit: int) -> list[Ca
             selected.append(row)
             selected_ids.add(row.person_id)
     return selected[:limit]
+
+
+def screen_recent_hires(ranked: list[Candidate], window_start: int) -> tuple[list[Candidate], dict[str, Any]]:
+    """Split candidates for a recent-hire query: only faculty with positive hire
+    evidence enter the pool; students/postdocs are excluded even when their fresh
+    degree year looks like a hire signal."""
+    def status(candidate: Candidate) -> str:
+        return (candidate.hire_assessment or {}).get("status", "unassessed")
+
+    def non_faculty(candidate: Candidate) -> bool:
+        return bool(candidate.role and contains_any(candidate.role, NON_FACULTY_TERMS))
+
+    pool = [c for c in ranked if status(c) == "likely_recent" and not non_faculty(c)]
+    screening = {
+        "window_start": window_start,
+        "likely_recent_count": len(pool),
+        "excluded_non_faculty": [
+            {"name": c.display_name, "position": c.role}
+            for c in ranked if status(c) == "likely_recent" and non_faculty(c)
+        ],
+        "excluded_hired_earlier": [
+            {"name": c.display_name, "signals": (c.hire_assessment or {}).get("signals", [])}
+            for c in ranked if status(c) == "hired_earlier"
+        ],
+        "no_hire_evidence": [
+            {"name": c.display_name, "position": c.role}
+            for c in ranked if status(c) in ("no_hire_evidence", "unassessed")
+        ][:20],
+        "method_note": (
+            "AMiner has no hire-date field. likely_recent requires positive evidence: a bio join "
+            "year in the window, a doctorate finished near it, or a junior title. Established "
+            "scholars hired recently are undetectable here and stay under no_hire_evidence — "
+            "never present them as confirmed new hires; verify against official department "
+            "announcements instead."
+        ),
+    }
+    return pool, screening
 
 
 def build_rank_key(mode: str, collaboration_type: str, rank_by: str):
@@ -797,7 +877,7 @@ def recommend_for_school(
     client: AMinerClient, school: str, department: str, direction: str, aliases: list[str], paper_limit: int,
     profile: dict[str, Any] | None, max_author_lookups: int, allow_name_fallback: bool,
     verify_roles: int, warnings: list[str], organization_cache: dict[str, ResolvedOrganization | None],
-    include_collaboration: bool, allow_cross_discipline: bool,
+    include_collaboration: bool, allow_cross_discipline: bool, hired_since: int = 0,
 ) -> dict[str, Candidate]:
     organization = organization_cache.get(school)
     if school not in organization_cache:
@@ -832,7 +912,7 @@ def recommend_for_school(
         enrich_collaboration(client, candidates, details, warnings)
     score_candidates(candidates, terms, school, department, profile)
     if verify_roles:
-        verify_candidate_roles(client, candidates, verify_roles, warnings)
+        verify_candidate_roles(client, candidates, verify_roles, warnings, hired_since)
         score_candidates(candidates, terms, school, department, profile)
     return candidates
 
@@ -898,6 +978,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-name-fallback", action="store_true")
     parser.add_argument("--allow-cross-discipline", action="store_true")
     parser.add_argument("--verify-roles", type=int, default=0, help="Paid person_detail calls for top N candidates")
+    parser.add_argument(
+        "--hired-since", type=int, default=0,
+        help="Screen for likely-recent hires since this year; implies person_detail verification for the shortlist",
+    )
     parser.add_argument("--max-cost", type=float, default=5.0)
     parser.add_argument("--yes", action="store_true", help="Allow a worst-case estimate above --max-cost")
     parser.add_argument("--no-auto-expand-profile", action="store_true", help="Search only explicitly selected profile schools")
@@ -947,8 +1031,11 @@ def main() -> None:
     requested_school_count = len(schools)
     schools = schools[: args.max_schools]
     estimated_school_count = args.max_schools if auto_expand_profile else len(schools)
+    # --hired-since needs person_detail evidence for the shortlist, so it implies
+    # role verification even when --verify-roles was not raised explicitly.
+    effective_verify_roles = max(args.verify_roles, args.candidate_limit if args.hired_since else 0)
     estimate = estimate_cost(
-        args.mode, estimated_school_count, min(3, 1 + len(aliases)), args.paper_limit, args.verify_roles,
+        args.mode, estimated_school_count, min(3, 1 + len(aliases)), args.paper_limit, effective_verify_roles,
         profile_discovery=auto_expand_profile,
     )
     if estimate["worst_case_cny"] >= args.max_cost and not args.yes:
@@ -1017,8 +1104,8 @@ def main() -> None:
             try:
                 found = recommend_for_school(
                     client, school, args.department, args.direction, aliases, args.paper_limit, profile,
-                    args.max_author_lookups, args.allow_name_fallback, args.verify_roles, warnings, organization_cache,
-                    args.mode == "collaboration", args.allow_cross_discipline,
+                    args.max_author_lookups, args.allow_name_fallback, effective_verify_roles, warnings, organization_cache,
+                    args.mode == "collaboration", args.allow_cross_discipline, args.hired_since,
                 )
             except AMinerAPIError as exc:
                 per_school[school] = 0
@@ -1042,9 +1129,13 @@ def main() -> None:
 
         rank_key = build_rank_key(args.mode, args.collaboration_type, args.rank_by)
         all_ranked = sorted(all_candidates.values(), key=rank_key, reverse=True)
+        hire_screening = None
+        pool = all_ranked
+        if args.hired_since:
+            pool, hire_screening = screen_recent_hires(all_ranked, args.hired_since)
         ranked = (
-            select_profile_portfolio(all_ranked, args.candidate_limit)
-            if args.mode == "profile" else all_ranked[: args.candidate_limit]
+            select_profile_portfolio(pool, args.candidate_limit)
+            if args.mode == "profile" else pool[: args.candidate_limit]
         )
         portfolio_band_counts = dict(Counter(
             candidate.recommendation_band for candidate in ranked if candidate.recommendation_band
@@ -1076,6 +1167,7 @@ def main() -> None:
                                  "auto_expanded": bool(auto_added_schools),
                                  "auto_added_schools": auto_added_schools},
             "candidates": [candidate.to_dict() for candidate in ranked],
+            "hire_screening": hire_screening,
             "portfolio_band_counts": portfolio_band_counts if args.mode == "profile" else None,
             "warnings": list(dict.fromkeys(warnings)), "errors": errors, "cost_estimate": estimate,
             "cost": client.cost.summary(),

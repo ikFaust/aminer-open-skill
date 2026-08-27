@@ -120,6 +120,7 @@ By default, profile mode uses AMiner direction evidence to add lower-tier instit
 - `--max-schools`: school cap for tier queries; default 5.
 - `--schools`: comma-separated explicit override for a tier.
 - `--verify-roles N`: call paid `person_detail` for up to N shortlisted candidates per school; default 0.
+- `--hired-since YEAR`: screen for likely-recent hires (e.g. 新引进导师 since 2020). Implies `person_detail` verification for the shortlist. Only candidates with positive evidence (bio join year in the window, doctorate finished near it, or a junior title) enter the main list; everyone else is reported under `hire_screening.no_hire_evidence` because AMiner has no hire-date field and established scholars hired recently are undetectable. Never present a `no_hire_evidence` scholar as a confirmed new hire — direct the user to official department announcements.
 - `--max-cost`: reject a worst-case estimate at or above this amount; default ¥5.00.
 - `--rank-by`: ranking dimension — `overall` (default), `citation` (established high-citation PIs), `recent` (most recent direction activity), `rising` (heuristic rising stars: recent direction evidence with a smaller citation base).
 - `--yes`: proceed above `--max-cost` only after the user explicitly confirms the estimate.
@@ -161,6 +162,7 @@ Use these labels consistently:
 - Never call unresolved name collisions verified people or emit an AMiner profile URL for them.
 - Do not claim international collaboration: the current implementation classifies academic/industry affiliation only and has no verified country dimension.
 - Never present co-authorship breadth as employment history: AMiner paper data cannot verify that a scholar held a position at a collaborating organization.
+- Never claim a scholar is a recently hired advisor without positive evidence; use `--hired-since` and report its `no_hire_evidence` bucket honestly.
 - Do not expose tokens or include them in logs, generated files, commands, or error messages.
 - Minimize personal data. Do not persist an applicant profile unless explicitly requested.
 - Report empty or partial results honestly; never fabricate advisors, papers, affiliations, collaborations, or rankings.
