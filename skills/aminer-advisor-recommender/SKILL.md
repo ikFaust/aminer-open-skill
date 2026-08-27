@@ -139,6 +139,13 @@ Apply the rubric in `references/scoring-rubric.md`. Keep raw evidence separate f
 - Do not penalize missing data as if it were negative evidence. Mark the component `unknown` and lower confidence.
 - Explain every score with observable evidence.
 
+## Verify on the web
+
+When the host provides web search or fetch tools, extend AMiner evidence with web verification. Never substitute model memory for either task below.
+
+1. **Hire dates**: for hire-screening results the user cares about — especially every relevant `no_hire_evidence` entry — search official sources: department faculty pages, 人才引进/新进教师 announcements, personal homepages (query patterns like `<学校> <学院> <姓名> 入职|加入|人才引进`). Prefer official domains (edu.cn, department sites). Attach the source URL and stated year to the candidate. Senior scholars confirmed this way are exactly the recent hires AMiner data cannot detect. If nothing authoritative is found, keep the candidate under needs-verification instead of guessing; a faculty-page listing alone confirms current affiliation, not the hire date.
+2. **Reputation (风评)**: only when the user explicitly asks. Search advisor-review discussions (导师评价、知乎、论坛等). Treat everything found as anonymous, unverifiable opinion: attribute it as such (「网络匿名评价称…」), cover both positive and negative signals with links, never restate allegations as established fact, and never fold reputation into the computed scores — present it as a separate needs-verification section alongside the evidence-based results.
+
 ## Present results
 
 Return:
@@ -162,7 +169,8 @@ Use these labels consistently:
 - Never call unresolved name collisions verified people or emit an AMiner profile URL for them.
 - Do not claim international collaboration: the current implementation classifies academic/industry affiliation only and has no verified country dimension.
 - Never present co-authorship breadth as employment history: AMiner paper data cannot verify that a scholar held a position at a collaborating organization.
-- Never claim a scholar is a recently hired advisor without positive evidence; use `--hired-since` and report its `no_hire_evidence` bucket honestly.
+- Never claim a scholar is a recently hired advisor without positive evidence; use `--hired-since`, report its `no_hire_evidence` bucket honestly, and web-verify those entries against official sources when web tools are available.
+- Reputation content from the web is anonymous opinion: present it attributed and unverified, never as fact, and never let it alter evidence-based scores.
 - Do not expose tokens or include them in logs, generated files, commands, or error messages.
 - Minimize personal data. Do not persist an applicant profile unless explicitly requested.
 - Report empty or partial results honestly; never fabricate advisors, papers, affiliations, collaborations, or rankings.
