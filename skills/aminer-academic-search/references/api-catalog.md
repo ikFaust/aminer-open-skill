@@ -8,21 +8,41 @@
 
 ## Table of Contents
 
-- [Paper APIs (8)](#paper-apis)
+- [Paper APIs (9)](#paper-apis)
 - [Scholar APIs (6)](#scholar-apis)
 - [Institution APIs (7)](#institution-apis)
 - [Journal APIs (3)](#journal-apis)
 - [Patent APIs (3)](#patent-apis)
+- [Experiment APIs (1)](#experiment-apis)
 
 ---
 
 ## Paper APIs
 
+### Choosing among the four search endpoints
+
+They overlap heavily on output — all four now return the same screening fields (`first_author`/`authors`, `venue_name`, `year`, `n_citation_bucket`), so **output is no longer a reason to pick one**. Decide on two observable facts instead: is the query string a phrase or a sentence, and how many results do you need.
+
+| | Accepts | Only it can do | Hard limit | Cost |
+|---|---|---|---|---|
+| Paper Search | Phrase | It is free | `title` only; ≤20/page; no filters or sort | Free |
+| Paper Search Pro | Phrase, per field | 100/page + hard sort; cheapest bulk | Sentence → 0, still billed | ¥0.01 |
+| Paper QA Search | Phrase or sentence | Weighted `topic_high/middle/low`; `sci_flag`; `offset` to 10000 | No ranges, no boolean exclusion | ¥0.05 |
+| Paper QA Search Pro | Sentence | Semantic parsing; year/citation ranges; `all/any/exclude`; best precision | Fixed 10/page, ¥0.30 per page | ¥0.30 |
+
+1. **Sentence?** Only the two QA endpoints parse it; the other two return 0 (and Paper Search Pro bills for that 0).
+2. **More than 10 results?** Do not use QA Search Pro — 100 results costs ¥3.00 there versus ¥0.01 on Paper Search Pro. **300×.**
+
+Spend ¥0.30 on QA Search Pro only for: a sentence query, a range filter, a boolean exclusion, or precision-first. Otherwise drop down.
+
+---
+
 ### 1. Paper Search
 
 - **URL**: `GET /api/paper/search`
 - **Price**: Free
-- **Description**: Search by paper title; returns low-cost screening fields such as paper ID, title, DOI, venue, first author, citation bucket, and year.
+- **Description**: Phrase match against the `title` field. Free, so it is the first thing to try for any **phrase** query — it is not limited to titles you already know: a short controlled phrase (`retrieval augmented generation`) returns thousands of on-topic hits. It cannot parse a sentence (returns 0) and offers no filters or sort, so escalate when you need those.
+- **Pick it when**: the query is a phrase and you need ≤20 results with no filtering.
 
 **Request Parameters:**
 
@@ -41,10 +61,12 @@
 | title_zh | Paper title (Chinese) |
 | doi | DOI |
 | first_author | First author |
-| n_citation_bucket | Citation bucket: `0`, `1-10`, `11-50`, `51-200`, `200-1000`, `1000-5000`, `5000+` |
+| n_citation_bucket | Citation bucket (see note below) |
 | venue_name | Venue title |
 | year | Publication year |
 | total | Total count |
+
+> **Citation bucket values.** The official docs describe the buckets as `0` / `1-10` / `11-50` / `51-200` / `200-1000` / `1000-5000` / `5000+`, but the live API emits the boundary-exclusive form `201-1000` and `1001-5000`. Match on both spellings; never parse a bucket into an exact citation count.
 
 **curl Example:**
 ```bash
@@ -60,14 +82,15 @@ curl -X GET \
 
 - **URL**: `GET /api/paper/search/pro`
 - **Price**: ¥0.01/call
-- **Description**: Multi-condition search; supports filtering by keyword, abstract, author, institution, and journal.
+- **Description**: Fielded literal matching across title / keyword / abstract / author / org / venue, with a hard sort. The **cheapest way to pull volume**: 100 results per call for ¥0.01. Matching is literal — a full sentence returns `"msg": "no data"` **and is still billed**; `keyword` wants one controlled term, `title`/`abstract` a two- or three-word phrase.
+- **Pick it when**: the query is already a structured filter, or you need more than 20 results.
 
 **Request Parameters:**
 
 | Parameter | Type | Required | Description |
 |--------|------|------|------|
 | page | number | No | Page number (starts at 0) |
-| size | number | No | Items per page |
+| size | number | No | Items per page, maximum 100 |
 | title | string | No | Title keyword |
 | keyword | string | No | Keyword |
 | abstract | string | No | Abstract keyword |
@@ -84,6 +107,10 @@ curl -X GET \
 | title | Title (English) |
 | title_zh | Title (Chinese) |
 | doi | DOI |
+| first_author | First author |
+| n_citation_bucket | Citation bucket (same values as Paper Search) |
+| venue_name | Venue title |
+| year | Publication year |
 | total | Total count |
 
 **curl Example:**
@@ -100,23 +127,24 @@ curl -X GET \
 
 - **URL**: `POST /api/paper/qa/search`
 - **Price**: ¥0.05/call
-- **Description**: AI-powered intelligent Q&A search; supports natural language queries and structured keyword search.
+- **Description**: Accepts either a sentence (via `query`, keywords extracted server-side) or weighted structured topics. Two things only this endpoint can do: **three-tier weighted nested AND/OR** (`topic_high`/`topic_middle`/`topic_low`) and **deep paging** (`size` ≤ 100 with `offset` ≤ 10000 — 100 results for ¥0.05, which Pro's 10-per-page cursor cannot match). It has no year/citation ranges and no boolean exclusion.
+- **Pick it when**: you need weighted topic tiers, `sci_flag`, or cheap deep paging.
 
 **Request Parameters:**
 
 | Parameter | Type | Required | Description |
 |--------|------|------|------|
-| use_topic | boolean | Yes | Whether to use combined keyword search. When `true`, use topic fields; when `false`, use title/query. |
+| use_topic | boolean | Yes | When `true`, searches with topic fields and/or keywords extracted from `query`; when `false`, only `title`/`doi` are read and `query` is ignored. Set `true` for any `query` or topic search. |
 | topic_high | string | No | Valid when use_topic=true; keywords that must match (AND logic). Nested array format: `[["termA","termB"],["termC"]]` — outer AND, inner OR. |
 | topic_middle | string | No | Strongly boosted terms; same format as topic_high. |
 | topic_low | string | No | Weakly boosted terms; same format as topic_high. |
-| title | []string | No | Title query when use_topic=false. |
+| title | []string | No | Title query; the only text field read when use_topic=false. |
 | doi | string | No | Exact DOI query. |
 | year | []number | No | Year filter array. |
 | sci_flag | boolean | No | Return SCI papers only. |
 | n_citation_flag | boolean | No | Boost papers with high citation counts. |
-| size | number | No | Maximum number of results to return. |
-| offset | number | No | Offset. |
+| size | number | No | Maximum number of results to return, maximum 100. |
+| offset | number | No | Offset, maximum 10000. |
 | force_citation_sort | boolean | No | Sort entirely by citation count. |
 | force_year_sort | boolean | No | Sort entirely by year. |
 | author_terms | []string | No | Author name query; OR relationship within array; include multiple variants. |
@@ -124,18 +152,24 @@ curl -X GET \
 | author_id | []string | No | Author entity ID filter; accepts single ID or ID list. OR relationship with author_terms when both are provided. |
 | org_id | []string | No | Institution entity ID filter; accepts single ID or ID list. OR relationship with org_terms when both are provided. |
 | venue_ids | []string | No | Conference/journal ID list filter. |
-| query | string | No | Raw natural language question (slower); system auto-extracts keywords. Takes precedence over topic_high when both are provided. |
+| query | string | No | Raw natural language question (slower); system auto-extracts keywords. Takes precedence over topic_high when both are provided. Only effective with use_topic=true; with `false` it is silently ignored and the call returns 403 "no data". |
 
 **Response Fields:**
 
 | Field | Description |
 |--------|------|
-| data | Paper ID list |
+| code | Status code |
+| message / msg | Status text |
+| data | Paper list |
 | id | Paper ID |
 | title | Paper title |
 | title_zh | Title (Chinese) |
 | doi | DOI |
-| Total / total | Total count |
+| first_author | First author |
+| n_citation_bucket | Citation bucket (same values as Paper Search); omitted for uncited papers |
+| venue_name | Venue title |
+| year | Publication year |
+| total | Total count |
 
 **curl Example (natural language Q&A):**
 ```bash
@@ -144,7 +178,7 @@ curl -X POST \
   -H 'Content-Type: application/json;charset=utf-8' \
   -H 'Authorization: ${AMINER_API_KEY}' \
   -H 'X-Platform: openclaw' \
-  -d '{"use_topic": false, "query": "deep learning protein structure prediction", "size": 10, "sci_flag": true}'
+  -d '{"use_topic": true, "query": "deep learning protein structure prediction", "size": 10, "sci_flag": true}'
 ```
 
 **curl Example (structured keywords):**
@@ -162,6 +196,105 @@ curl -X POST \
     "force_citation_sort": true,
     "size": 10
   }'
+```
+
+> **Narrow but not obsolete.** Reach for this when you need weighted topic tiers, `sci_flag`, or 100 results at depth for ¥0.05. For a plain sentence query use Paper QA Search Pro; for a plain phrase query use the free Paper Search or ¥0.01 Paper Search Pro.
+
+---
+
+### 3b. Paper QA Search Pro
+
+> **Highest quality, highest price (¥0.30 — 30× Paper Search Pro).** Not a blanket default: spend it only when the query is a sentence, needs a range filter or boolean exclusion, or precision is the explicit requirement.
+
+- **URL**: `POST /api/paper/qa/searchPro`
+- **Price**: ¥0.30/call
+- **Description**: The only endpoint that genuinely parses natural language, and the highest-precision retrieval of the four. Adds year/citation **ranges**, `all_terms`/`any_terms`/`exclude_terms` booleans, `search_in` scoping, and `sort` modes. Page size is fixed at **10** (not client-configurable) and each cursor page costs another ¥0.30, so it is the wrong tool for volume.
+- **Pick it when** you can name one of: a sentence query, a range filter, a boolean exclusion, or precision-first (the user wants accuracy, or a cheaper endpoint already came back off-topic). Otherwise drop to `paper_search_pro` — 30× cheaper.
+
+> **Path change.** The canonical path is now `/api/paper/qa/searchPro`. The old `/api/v3/paper/qa/searchPro` still resolves as a legacy alias, but new code should use the non-`v3` path.
+
+**Request Parameters:**
+
+| Parameter | Type | Required | Description |
+|--------|------|------|------|
+| query | string | No | Search text, max 500. Required when `query_type` is not `auto`. |
+| query_type | string | No | `auto` / `topic` / `keywords` / `title` / `identifier`. Default `auto`. |
+| cursor | string | No | Pagination cursor (16–256 chars). On next page, request body may contain **only** `cursor`. |
+| authors | []string | No | Author names; OR within list; max 100 |
+| author_ids | []string | No | Author IDs; OR with `authors` |
+| organizations | []string | No | Organization names; OR within list |
+| organization_ids | []string | No | Organization IDs; OR with `organizations` |
+| venues | []string | No | Venue names, e.g. `["NeurIPS"]` |
+| venue_ids | []string | No | Venue IDs; OR with `venues` |
+| year_values | []number | No | Exact years; mutually exclusive with `year_from`/`year_to` |
+| year_from | number | No | Start year (inclusive) |
+| year_to | number | No | End year (inclusive); must be ≥ `year_from` |
+| languages | []string | No | Hard language filter, e.g. `["en","zh"]` |
+| language_preference | string | No | Soft preference boost: `zh` / `en` |
+| has_chinese_title | boolean | No | Require / forbid Chinese title |
+| has_abstract | boolean | No | Require / forbid abstract |
+| min_citations | number | No | Minimum citation count (inclusive) |
+| max_citations | number | No | Maximum citation count (inclusive) |
+| all_terms | []string | No | All terms must match; max 20 |
+| any_terms | []string | No | At least one term must match |
+| exclude_terms | []string | No | Exclude if any term matches |
+| search_in | string | No | Scope for all/any/exclude only: `all` / `title` / `title_keywords` / `abstract` |
+| paper_ids | []string | No | Restrict to paper IDs |
+| exclude_paper_ids | []string | No | Exclude paper IDs |
+| dois | []string | No | DOI filter |
+| sort | string | No | `relevance` / `balanced` / `recent` / `citation` |
+
+**Response Fields (open-platform envelope):**
+
+| Field | Description |
+|--------|------|
+| success | Whether the call succeeded |
+| code | HTTP-style status: 200/400/410/500/502/503/504 |
+| message / msg | Status text; success often `"success"` or empty |
+| data | Business payload; usually `null` on failure |
+| data.items | Paper list (card view, compact fields only) |
+| data.items[].paper_id | Paper ID |
+| data.items[].title | Title (English/original) |
+| data.items[].title_zh | Title (Chinese) |
+| data.items[].authors[].name | Author English name |
+| data.items[].authors[].name_zh | Author Chinese name |
+| data.items[].n_citation_bucket | Citation bucket (same values as Paper Search) |
+| data.items[].venue_name | Venue title |
+| data.items[].year | Publication year (may be omitted) |
+| data.total.value | Hit count estimate |
+| data.total.relation | `eq` / `gte` / `unknown` |
+| data.next_cursor | Next-page cursor; null/omitted when no more pages |
+| data.warnings | Business warnings (`code` / `message`) |
+
+**Notes:**
+- Page size is fixed at 10; do **not** send `size` / `view` / `facets` / internal debug flags.
+- Pagination: first page → read `next_cursor` → next page body is `{"cursor":"..."}` only.
+- Always append paper URL: `https://www.aminer.cn/pub/{paper_id}`.
+
+**curl Example:**
+```bash
+curl -X POST \
+  'https://datacenter.aminer.cn/gateway/open_platform/api/paper/qa/searchPro' \
+  -H 'Content-Type: application/json;charset=utf-8' \
+  -H 'Authorization: ${AMINER_API_KEY}' \
+  -H 'X-Platform: openclaw' \
+  -d '{
+    "query": "大模型比较新的高引论文",
+    "query_type": "auto",
+    "sort": "balanced",
+    "year_from": 2024,
+    "min_citations": 30
+  }'
+```
+
+**curl Example (next page):**
+```bash
+curl -X POST \
+  'https://datacenter.aminer.cn/gateway/open_platform/api/paper/qa/searchPro' \
+  -H 'Content-Type: application/json;charset=utf-8' \
+  -H 'Authorization: ${AMINER_API_KEY}' \
+  -H 'X-Platform: openclaw' \
+  -d '{"cursor":"<NEXT_CURSOR_FROM_PREVIOUS_RESPONSE>"}'
 ```
 
 ---
@@ -1039,15 +1172,93 @@ curl -X GET \
 
 ---
 
+## Experiment APIs
+
+### 29. Experiment Search
+
+- **URL**: `POST /api/v3/paper/search/experiment_data/SearchPro`
+- **Price**: ¥0.10/call
+- **Authentication**: `Authorization: ${AMINER_API_KEY}`, `X-Platform: openclaw`
+- **Description**: Retrieve original structured Experiment JSON. Exact filters plus Elasticsearch `search_text`. Use only for explicit experiment-level requests.
+
+**Skill Parameters:**
+
+| Parameter | Type | Required | Description |
+|--------|------|------|------|
+| paper_id | string | Conditional | Exact paper ID; sent as backend `paper_id` after trim |
+| search_text | string | Conditional | ES full-text over experiment text fields below. Free text (paper title, experiment name, etc.) goes here. |
+| dataset_name | string | Conditional | Exact `datasets[].name`; sent as backend `dataset` after trim |
+| method | string | Conditional | Exact method; sent as backend `method` after trim |
+| size | number | No | Added to the backend body only when greater than 0 |
+
+At least one of `paper_id`, `method`, `dataset_name`, or `search_text` must be non-empty.
+
+**`search_text` covers these indexed text fields:**
+`paper_title`, `experiment_name`, `research_problem`, `research_problem_description`, `research_goal`, `method`, `method_description`, `conclusion`, `limitations`, `key_results`.
+
+**Backend Request Body:**
+
+```json
+{
+  "paper_id": "",
+  "method": "",
+  "dataset": "",
+  "search_text": ""
+}
+```
+
+Exact filter fields and `search_text` are always present after trim (empty string when unused). `size` is optional and is added only when greater than 0. Do **not** accept or send a separate `experiment_name` query parameter; put that text in `search_text`.
+
+**Supported Response Shapes:**
+- An array of Experiment objects
+- `{ "results": [...] }`
+- Arrays under `data`, `items`, `experiments`, or `records`
+- Any nesting of those supported envelope fields
+- A single Experiment object
+
+A single Experiment object is recognized by the presence of `paper_id` or `experiment_name`. Unrecognized responses return a structured `invalid_experiment_response` error and are never silently treated as empty results.
+
+**Common Experiment Fields:**
+
+| Field | Description |
+|--------|------|
+| paper_id | Source paper ID |
+| paper_title | Paper title |
+| experiment_name | Experiment name |
+| research_problem / research_problem_description | Research problem text |
+| research_goal | Research goal |
+| method / method_description | Method text |
+| datasets | Dataset objects; `dataset_name` maps to backend `dataset` |
+| conclusion / limitations / key_results | Result narrative fields |
+
+**Matching and Output Rules:**
+- `paper_id` / `method` / `dataset` are exact filters; `search_text` is ES full-text. No client-side re-filtering.
+- Backend-bound values use trim only and preserve case.
+- Success shape: `{ "results": [...] }` with original Experiment objects.
+- Do not summarize raw JSON; presentation may list non-empty returned fields only.
+
+**curl Example:**
+```bash
+curl -X POST \
+  'https://datacenter.aminer.cn/gateway/open_platform/api/v3/paper/search/experiment_data/SearchPro' \
+  -H 'Content-Type: application/json;charset=utf-8' \
+  -H 'Authorization: ${AMINER_API_KEY}' \
+  -H 'X-Platform: openclaw' \
+  -d '{"paper_id":"<PAPER_ID>","method":"","dataset":"","search_text":"Baseline"}'
+```
+
+---
+
 ## Appendix: API Pricing Summary
 
 | Category | Free APIs | Paid APIs |
 |------|---------|---------|
-| Paper | Paper Search, Paper Info | Paper Search Pro(¥0.01), Paper Details(¥0.01), Paper Citations(¥0.10), Paper QA Search(¥0.05), Paper Batch Query(¥0.10), By Condition(¥0.20) |
+| Paper | Paper Search, Paper Info | Paper Search Pro(¥0.01), Paper Details(¥0.01), Paper Citations(¥0.10), Paper QA Search(¥0.05), **Paper QA Search Pro(¥0.30)**, Paper Batch Query(¥0.10), By Condition(¥0.20) |
 | Scholar | Scholar Search | Scholar Details(¥1.00), Scholar Portrait(¥0.50), Scholar Papers(¥1.50), Scholar Patents(¥1.50), Scholar Projects(¥1.50) |
 | Institution | Org Search | Org Details(¥0.01), Org Scholars(¥0.50), Org Papers(¥0.10), Org Patents(¥0.10), Org Disambiguation(¥0.01), Org Disambiguation Pro(¥0.05) |
 | Journal | Venue Search | Venue Details(¥0.20), Venue Papers(¥0.10) |
 | Patent | Patent Search, Patent Info | Patent Details(¥0.01) |
+| Experiment | None | Experiment Search(¥0.10) |
 
 ---
 
@@ -1071,6 +1282,7 @@ curl -X GET \
 |-----|-----------|
 | `paper_search` | `size` max 20; `page` starts at 1 |
 | `paper_search_pro` | `page` starts at 0 |
+| `paper_qa_search_pro` | Fixed 10 results/page; use `cursor` / `next_cursor` (cursor-only body on next page) |
 | `person_search` | `size` max 10; `offset` fixed at 0 (no pagination) |
 | `org_person_relation` | Fixed 10 results per call; use `offset` to paginate |
 | `org_paper_relation` | Fixed 10 results per call; use `offset` to paginate |

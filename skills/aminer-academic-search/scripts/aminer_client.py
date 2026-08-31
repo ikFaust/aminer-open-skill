@@ -16,6 +16,7 @@ Workflows:
     paper_qa          Academic Q&A (AI-driven keyword search)
     patent_search     Patent search and details
     scholar_patents   Retrieve all patent details for a scholar by name
+    experiment_retrieval  Explicit structured Experiment JSON retrieval
 
 Direct single API call:
     raw               Call any API directly; requires --api and --params
@@ -43,12 +44,12 @@ REQUEST_TIMEOUT_SECONDS = 30
 MAX_RETRIES = 3
 RETRYABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
 
-API_PRICE: dict[str, float] = {
+API_PRICE: dict[str, Optional[float]] = {
     "paper_search": 0, "paper_info": 0, "person_search": 0,
     "org_search": 0, "venue_search": 0, "patent_search": 0, "patent_info": 0,
     "paper_search_pro": 0.01, "paper_detail": 0.01, "patent_detail": 0.01,
     "org_detail": 0.01, "org_disambiguate": 0.01,
-    "paper_qa_search": 0.05, "org_disambiguate_pro": 0.05,
+    "paper_qa_search": 0.05, "paper_qa_search_pro": 0.30, "org_disambiguate_pro": 0.05,
     "paper_relation": 0.10, "org_paper_relation": 0.10,
     "org_patent_relation": 0.10, "venue_paper_relation": 0.10,
     "paper_list_by_keywords": 0.10,
@@ -57,9 +58,10 @@ API_PRICE: dict[str, float] = {
     "person_detail": 1.00,
     "person_paper_relation": 1.50, "person_patent_relation": 1.50,
     "person_project": 1.50,
+    "experiment_search": 0.10,
 }
 
-_cost_log: list[tuple[str, float]] = []
+_cost_log: list[tuple[str, Optional[float]]] = []
 _cost_lock = threading.Lock()
 
 
@@ -71,11 +73,23 @@ def _track_cost(api_name: str) -> None:
 
 def get_cost_summary() -> dict:
     with _cost_lock:
-        total = sum(p for _, p in _cost_log)
+        total = sum(p for _, p in _cost_log if p is not None)
         breakdown = {}
+        unpriced_calls = 0
         for name, price in _cost_log:
-            breakdown[name] = breakdown.get(name, 0) + price
-        return {"total": round(total, 2), "breakdown": breakdown, "calls": len(_cost_log)}
+            if price is None:
+                breakdown[name] = None
+                unpriced_calls += 1
+            else:
+                breakdown[name] = (breakdown.get(name) or 0) + price
+        summary = {
+            "total": round(total, 2),
+            "breakdown": breakdown,
+            "calls": len(_cost_log),
+        }
+        if unpriced_calls:
+            summary["unpriced_calls"] = unpriced_calls
+        return summary
 
 
 def reset_cost() -> None:
@@ -190,7 +204,7 @@ def paper_search_pro(token: str, title: str = None, keyword: str = None,
 
 
 def paper_qa_search(token: str, query: str = None,
-                    use_topic: bool = False,
+                    use_topic: bool = True,
                     topic_high: str = None, topic_middle: str = None, topic_low: str = None,
                     title: list = None, doi: str = None, year: list = None,
                     sci_flag: bool = False, n_citation_flag: bool = False,
@@ -198,7 +212,7 @@ def paper_qa_search(token: str, query: str = None,
                     author_terms: list = None, org_terms: list = None,
                     author_id: list = None, org_id: list = None, venue_ids: list = None,
                     size: int = 10, offset: int = 0) -> Any:
-    """Paper QA Search (¥0.05/call): AI-powered Q&A; supports natural language and structured keywords."""
+    """Legacy Paper QA Search (¥0.05/call). Prefer paper_qa_search_pro; use this only for topic_* OR/AND."""
     _track_cost("paper_qa_search")
     body: dict = {"use_topic": use_topic, "size": size, "offset": offset}
     optional = {
@@ -217,6 +231,80 @@ def paper_qa_search(token: str, query: str = None,
     if force_year_sort:
         body["force_year_sort"] = True
     return _request(token, "POST", "/api/paper/qa/search", body=body)
+
+
+def paper_qa_search_pro(
+    token: str,
+    query: str = None,
+    query_type: str = "auto",
+    cursor: str = None,
+    authors: list = None,
+    author_ids: list = None,
+    organizations: list = None,
+    organization_ids: list = None,
+    venues: list = None,
+    venue_ids: list = None,
+    year_values: list = None,
+    year_from: int = None,
+    year_to: int = None,
+    languages: list = None,
+    language_preference: str = None,
+    has_chinese_title: bool = None,
+    has_abstract: bool = None,
+    min_citations: int = None,
+    max_citations: int = None,
+    all_terms: list = None,
+    any_terms: list = None,
+    exclude_terms: list = None,
+    search_in: str = None,
+    paper_ids: list = None,
+    exclude_paper_ids: list = None,
+    dois: list = None,
+    sort: str = None,
+) -> Any:
+    """Paper QA Search Pro (¥0.30/call): NL + filters; fixed 10/page; cursor pagination."""
+    _track_cost("paper_qa_search_pro")
+    if cursor:
+        return _request(
+            token, "POST", "/api/paper/qa/searchPro", body={"cursor": cursor}
+        )
+    body: dict = {}
+    if query is not None:
+        body["query"] = query
+    if query_type is not None:
+        body["query_type"] = query_type
+    optional = {
+        "authors": authors,
+        "author_ids": author_ids,
+        "organizations": organizations,
+        "organization_ids": organization_ids,
+        "venues": venues,
+        "venue_ids": venue_ids,
+        "year_values": year_values,
+        "year_from": year_from,
+        "year_to": year_to,
+        "languages": languages,
+        "language_preference": language_preference,
+        "has_chinese_title": has_chinese_title,
+        "has_abstract": has_abstract,
+        "min_citations": min_citations,
+        "max_citations": max_citations,
+        "all_terms": all_terms,
+        "any_terms": any_terms,
+        "exclude_terms": exclude_terms,
+        "search_in": search_in,
+        "paper_ids": paper_ids,
+        "exclude_paper_ids": exclude_paper_ids,
+        "dois": dois,
+        "sort": sort,
+    }
+    for key, value in optional.items():
+        if value is None:
+            continue
+        if isinstance(value, list) and not value:
+            continue
+        body[key] = value
+    return _request(token, "POST", "/api/paper/qa/searchPro", body=body)
 
 
 def paper_info(token: str, ids: list) -> Any:
@@ -253,6 +341,121 @@ def paper_detail_by_condition(token: str, year: int, venue_id: str = None) -> An
     return _request(token, "GET",
                     "/api/paper/platform/allpubs/more/detail/by/ts/org/venue",
                     params=params)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Experiment API
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Exact filters + ES search_text (paper_title, experiment_name, research_problem(+_description),
+# research_goal, method(+_description), conclusion, limitations, key_results).
+# No client-side result filtering and no paper-title resolution.
+
+
+class ExperimentResponseError(ValueError):
+    """Raised when a response cannot be identified as Experiment data."""
+
+
+def _experiment_raw(value: Any) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def _build_experiment_payload(
+    paper_id: str = "",
+    search_text: str = "",
+    dataset_name: str = "",
+    method: str = "",
+    size: int = 0,
+) -> dict[str, Any]:
+    payload = {
+        "paper_id": _experiment_raw(paper_id),
+        "method": _experiment_raw(method),
+        "dataset": _experiment_raw(dataset_name),
+        "search_text": _experiment_raw(search_text),
+    }
+    if not any(payload.values()):
+        raise ValueError("At least one experiment retrieval field must be non-empty")
+    if size > 0:
+        payload["size"] = size
+    return payload
+
+
+def _adapt_experiment_response(raw: Any) -> list[dict[str, Any]]:
+    """Unwrap common envelopes; keep original Experiment objects."""
+
+    def is_record(value: Any) -> bool:
+        return isinstance(value, dict) and (
+            "paper_id" in value or "experiment_name" in value
+        )
+
+    def extract(value: Any) -> Optional[list[dict[str, Any]]]:
+        if isinstance(value, list):
+            return value if all(is_record(item) for item in value) else None
+        if not isinstance(value, dict):
+            return None
+        if is_record(value):
+            return [value]
+        for key in ("results", "data", "items", "experiments", "records"):
+            if key in value:
+                records = extract(value[key])
+                if records is not None:
+                    return records
+        return None
+
+    records = extract(raw)
+    if records is None:
+        raise ExperimentResponseError(
+            "Unable to adapt API response to an Experiment list"
+        )
+    return records
+
+
+def experiment_search(
+    token: str,
+    paper_id: str = "",
+    search_text: str = "",
+    dataset_name: str = "",
+    method: str = "",
+    size: int = 0,
+) -> Any:
+    """Experiment Search (¥0.10/call): retrieve Experiment JSON via exact filters and ES search_text."""
+    try:
+        payload = _build_experiment_payload(
+            paper_id=paper_id,
+            search_text=search_text,
+            dataset_name=dataset_name,
+            method=method,
+            size=size,
+        )
+    except ValueError as exc:
+        return {
+            "code": -1,
+            "success": False,
+            "msg": "invalid_experiment_query",
+            "error": str(exc),
+            "retryable": False,
+        }
+
+    _track_cost("experiment_search")
+    raw = _request(
+        token,
+        "POST",
+        "/api/v3/paper/search/experiment_data/SearchPro",
+        body=payload,
+    )
+    if isinstance(raw, dict) and raw.get("success") is False:
+        return raw
+
+    try:
+        return {"results": _adapt_experiment_response(raw)}
+    except ExperimentResponseError as exc:
+        return {
+            "code": -1,
+            "success": False,
+            "msg": "invalid_experiment_response",
+            "error": str(exc),
+            "retryable": False,
+        }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -666,45 +869,76 @@ def workflow_paper_qa(token: str, query: str = None,
                       topic_high: str = None, topic_middle: str = None,
                       sci_flag: bool = False, sort_citation: bool = False, sort_year: bool = False,
                       author_id: list = None, org_id: list = None, venue_ids: list = None,
-                      size: int = 10) -> dict:
+                      size: int = 10,
+                      year_from: int = None, year_to: int = None,
+                      min_citations: int = None, cursor: str = None) -> dict:
     """
-    Workflow 5: Paper QA Search
-    Use AI-powered paper Q&A search API
+    Workflow: Paper QA Search — prefer Pro, use legacy sparingly.
+    - Default: natural language / filters → paper_qa_search_pro (¥0.30, fixed 10/page)
+    - Rare: only topic_high/topic_middle → legacy paper_qa_search (¥0.05)
     """
-    use_topic = topic_high is not None
-    print(f"[1/1] Academic Q&A search: query={query}, use_topic={use_topic}", file=sys.stderr)
-    qa_result = paper_qa_search(
-        token, query=query, use_topic=use_topic,
-        topic_high=topic_high, topic_middle=topic_middle,
-        sci_flag=sci_flag, force_citation_sort=sort_citation,
-        force_year_sort=sort_year,
-        author_id=author_id, org_id=org_id, venue_ids=venue_ids,
-        size=size
-    )
-    if qa_result and qa_result.get("code") == 200 and qa_result.get("data"):
-        qa_result["source_api_chain"] = ["paper_qa_search"]
-        qa_result["route"] = "paper_qa_search"
+    # Structured topic_* exists only on the legacy endpoint; avoid unless required.
+    if topic_high or topic_middle:
+        print(f"[1/1] Legacy topic QA search: topic_high={bool(topic_high)}", file=sys.stderr)
+        qa_result = paper_qa_search(
+            token, query=query, use_topic=True,
+            topic_high=topic_high, topic_middle=topic_middle,
+            sci_flag=sci_flag, force_citation_sort=sort_citation,
+            force_year_sort=sort_year,
+            author_id=author_id, org_id=org_id, venue_ids=venue_ids,
+            size=size,
+        )
+        if isinstance(qa_result, dict):
+            qa_result["source_api_chain"] = ["paper_qa_search"]
+            qa_result["route"] = "paper_qa_search"
         return qa_result
 
-    # Fall back to pro search when query mode yields no results
-    if query:
-        print("      paper_qa_search returned no results; falling back to paper_search_pro...", file=sys.stderr)
-        fallback = paper_search_pro(token, keyword=query, order="n_citation", size=size)
-        data = (fallback or {}).get("data") or []
+    sort = None
+    if sort_citation:
+        sort = "citation"
+    elif sort_year:
+        sort = "recent"
+
+    print(f"[1/1] Paper QA Search Pro: query={query}, sort={sort}", file=sys.stderr)
+    qa_result = paper_qa_search_pro(
+        token,
+        query=query,
+        query_type="auto",
+        cursor=cursor,
+        author_ids=author_id,
+        organization_ids=org_id,
+        venue_ids=venue_ids,
+        year_from=year_from,
+        year_to=year_to,
+        min_citations=min_citations,
+        sort=sort,
+    )
+    data = (qa_result or {}).get("data") or {}
+    items = data.get("items") if isinstance(data, dict) else None
+    if qa_result and qa_result.get("code") == 200 and items:
+        qa_result["source_api_chain"] = ["paper_qa_search_pro"]
+        qa_result["route"] = "paper_qa_search_pro"
+        return qa_result
+
+    if query and not cursor:
+        print("      paper_qa_search_pro returned no results; falling back to paper_search_pro...", file=sys.stderr)
+        order = "n_citation" if sort_citation or not sort_year else "year"
+        fallback = paper_search_pro(token, keyword=query, order=order, size=min(size, 10))
+        fb_data = (fallback or {}).get("data") or []
         return {
-            "code": 200 if data else (qa_result or {}).get("code", -1),
-            "success": bool(data),
-            "msg": "" if data else "no data",
-            "data": data,
-            "total": (fallback or {}).get("total", len(data)),
-            "route": "paper_qa_search -> paper_search_pro",
-            "source_api_chain": ["paper_qa_search", "paper_search_pro"],
+            "code": 200 if fb_data else (qa_result or {}).get("code", -1),
+            "success": bool(fb_data),
+            "msg": "" if fb_data else "no data",
+            "data": fb_data,
+            "total": (fallback or {}).get("total", len(fb_data)),
+            "route": "paper_qa_search_pro -> paper_search_pro",
+            "source_api_chain": ["paper_qa_search_pro", "paper_search_pro"],
             "primary_result": qa_result,
         }
 
     if isinstance(qa_result, dict):
-        qa_result["source_api_chain"] = ["paper_qa_search"]
-        qa_result["route"] = "paper_qa_search"
+        qa_result["source_api_chain"] = ["paper_qa_search_pro"]
+        qa_result["route"] = "paper_qa_search_pro"
     return qa_result
 
 
@@ -802,8 +1036,10 @@ Examples:
   # Journal paper monitoring
   python aminer_client.py --token <TOKEN> --action venue_papers --venue "NeurIPS" --year 2023
 
-  # Academic Q&A
+  # Academic Q&A (default: paper_qa_search_pro)
   python aminer_client.py --token <TOKEN> --action paper_qa --query "deep learning for protein structure"
+  python aminer_client.py --token <TOKEN> --action paper_qa \\
+    --query "graph neural network" --sort_citation --year_from 2020 --min_citations 50
   python aminer_client.py --token <TOKEN> --action paper_qa \\
     --topic_high '[["transformer","self-attention"],["protein folding"]]' \\
     --sci_flag --sort_citation
@@ -813,6 +1049,10 @@ Examples:
 
   # Scholar patents
   python aminer_client.py --token <TOKEN> --action scholar_patents --name "Shou-Cheng Zhang"
+
+  # Structured experiment retrieval
+  python aminer_client.py --token <TOKEN> --action experiment_retrieval \\
+    --paper-id <PAPER_ID> --search-text "Baseline" --dataset-name "ImageNet" --size 10
 
   # Direct single API call
   python aminer_client.py --token <TOKEN> --action raw \\
@@ -833,7 +1073,7 @@ Docs: https://open.aminer.cn/open/docs
     p.add_argument("--action", required=True,
                    choices=["scholar_profile", "paper_deep_dive", "org_analysis",
                             "venue_papers", "paper_qa", "patent_search",
-                            "scholar_patents", "raw"],
+                            "scholar_patents", "experiment_retrieval", "raw"],
                    help="Action to perform")
 
     # General parameters
@@ -861,6 +1101,23 @@ Docs: https://open.aminer.cn/open/docs
     p.add_argument("--author_id", help="Author ID filter; accepts single ID or JSON array string")
     p.add_argument("--org_id", help="Institution ID filter; accepts single ID or JSON array string")
     p.add_argument("--venue_ids", help="Conference/journal ID filter; accepts JSON array string")
+    p.add_argument("--year_from", type=int, help="[paper_qa pro] start year (inclusive)")
+    p.add_argument("--year_to", type=int, help="[paper_qa pro] end year (inclusive)")
+    p.add_argument("--min_citations", type=int, help="[paper_qa pro] minimum citation count")
+    p.add_argument("--cursor", help="[paper_qa pro] pagination cursor from previous next_cursor")
+
+    # Experiment retrieval specific
+    p.add_argument("--paper-id", help="[experiment] exact paper_id filter")
+    p.add_argument(
+        "--search-text",
+        help=(
+            "[experiment] ES full-text query over paper_title, experiment_name, "
+            "research_problem(+_description), research_goal, method(+_description), "
+            "conclusion, limitations, key_results. Map experiment-name intent here."
+        ),
+    )
+    p.add_argument("--dataset-name", help="[experiment] exact datasets[].name filter")
+    p.add_argument("--method", help="[experiment] exact method filter")
 
     # Raw mode
     p.add_argument("--api", help="[raw mode] API function name, e.g. paper_search")
@@ -888,11 +1145,12 @@ WORKFLOW_DRY_RUN_INFO = {
     "venue_papers": [
         ("venue_search", 0), ("venue_detail", 0.20), ("venue_paper_relation", 0.10),
     ],
-    "paper_qa": [("paper_qa_search", 0.05)],
+    "paper_qa": [("paper_qa_search_pro", 0.30)],
     "patent_search": [("patent_search", 0), ("patent_detail", 0.01)],
     "scholar_patents": [
         ("person_search", 0), ("person_patent_relation", 1.50), ("patent_detail", 0.01),
     ],
+    "experiment_retrieval": [("experiment_search", 0.10)],
 }
 
 
@@ -906,12 +1164,22 @@ def main():
         if not info:
             print(f"[Dry Run] No preview available for action '{args.action}'.")
         else:
-            total = sum(p for _, p in info)
+            total = sum(p for _, p in info if p is not None)
+            unpriced_calls = sum(1 for _, p in info if p is None)
             print(f"[Dry Run] Action: {args.action}")
             for i, (api, price) in enumerate(info, 1):
-                label = "Free" if price == 0 else f"¥{price:.2f}"
+                if price is None:
+                    label = "TBD"
+                else:
+                    label = "Free" if price == 0 else f"¥{price:.2f}"
                 print(f"  {i}. {api} ({label})")
-            print(f"  Estimated total: ¥{total:.2f}")
+            if unpriced_calls:
+                print(
+                    f"  Estimated known total: CNY {total:.2f}; "
+                    f"excludes {unpriced_calls} TBD API call(s)"
+                )
+            else:
+                print(f"  Estimated total: ¥{total:.2f}")
         return
 
     if not token or not token.strip():
@@ -970,7 +1238,9 @@ def main():
             topic_high=args.topic_high, topic_middle=args.topic_middle,
             sci_flag=args.sci_flag, sort_citation=args.sort_citation, sort_year=args.sort_year,
             author_id=author_id_filter, org_id=org_id_filter, venue_ids=venue_ids_filter,
-            size=args.size
+            size=args.size,
+            year_from=args.year_from, year_to=args.year_to,
+            min_citations=args.min_citations, cursor=args.cursor,
         )
 
     elif args.action == "patent_search":
@@ -983,6 +1253,29 @@ def main():
             parser.error("--action scholar_patents requires --name")
         result = workflow_scholar_patents(token, args.name)
 
+    elif args.action == "experiment_retrieval":
+        if not any(
+            value and str(value).strip()
+            for value in (
+                args.paper_id,
+                args.search_text,
+                args.dataset_name,
+                args.method,
+            )
+        ):
+            parser.error(
+                "--action experiment_retrieval requires --paper-id, "
+                "--search-text, --dataset-name, or --method"
+            )
+        result = experiment_search(
+            token,
+            paper_id=args.paper_id or "",
+            search_text=args.search_text or "",
+            dataset_name=args.dataset_name or "",
+            method=args.method or "",
+            size=args.size,
+        )
+
     elif args.action == "raw":
         if not args.api:
             parser.error("--action raw requires --api (API function name)")
@@ -990,11 +1283,13 @@ def main():
             "paper_search": paper_search,
             "paper_search_pro": paper_search_pro,
             "paper_qa_search": paper_qa_search,
+            "paper_qa_search_pro": paper_qa_search_pro,
             "paper_info": paper_info,
             "paper_detail": paper_detail,
             "paper_relation": paper_relation,
             "paper_list_by_keywords": paper_list_by_keywords,
             "paper_detail_by_condition": paper_detail_by_condition,
+            "experiment_search": experiment_search,
             "person_search": person_search,
             "person_detail": person_detail,
             "person_figure": person_figure,
@@ -1030,10 +1325,21 @@ def main():
 
     cost = get_cost_summary()
     if cost["calls"] > 0:
-        parts = [f"{k}: ¥{v:.2f}" if v > 0 else f"{k}: Free"
-                 for k, v in sorted(cost["breakdown"].items())]
-        print(f"\n[Cost] ¥{cost['total']:.2f} total, {cost['calls']} API calls "
-              f"({', '.join(parts)})", file=sys.stderr)
+        parts = [
+            f"{k}: TBD" if v is None
+            else (f"{k}: ¥{v:.2f}" if v > 0 else f"{k}: Free")
+            for k, v in sorted(cost["breakdown"].items())
+        ]
+        if cost.get("unpriced_calls"):
+            print(
+                f"\n[Cost] CNY {cost['total']:.2f} known total, "
+                f"{cost['calls']} API calls ({', '.join(parts)}); "
+                f"total excludes {cost['unpriced_calls']} TBD call(s)",
+                file=sys.stderr,
+            )
+        else:
+            print(f"\n[Cost] ¥{cost['total']:.2f} total, {cost['calls']} API calls "
+                  f"({', '.join(parts)})", file=sys.stderr)
 
 
 if __name__ == "__main__":
