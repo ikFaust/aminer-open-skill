@@ -672,6 +672,41 @@ def mark_duplicate_names(candidates: dict[str, Candidate]) -> dict[str, Candidat
     return candidates
 
 
+def backfill_chinese_names(client: AMinerClient, candidates: list[Candidate], warnings: list[str]) -> None:
+    """Fill empty name_zh for the final shortlist so Chinese users see a Chinese name.
+
+    person_search is free. The matched person_search row sometimes lacks name_zh even
+    though the same scholar has one on another record. Prefer a same-org record with a
+    Chinese name; if only a different-org homonym has one, attach it flagged as
+    unverified rather than inventing a transliteration. Never fabricate a Chinese name.
+    """
+    filled = 0
+    unresolved = 0
+    for cand in candidates:
+        if cand.name_zh.strip() or cand.person_id.startswith("unresolved:"):
+            continue
+        try:
+            rows = unwrap(client.call("person_search", {"name": cand.name, "size": 5}))
+        except AMinerAPIError:
+            continue
+        same_org = next((r.get("name_zh") for r in rows
+                         if str(r.get("org_id") or "") == cand.org_id and r.get("name_zh")), None)
+        if same_org:
+            cand.name_zh = str(same_org)
+            filled += 1
+            continue
+        any_zh = next((r.get("name_zh") for r in rows if r.get("name_zh")), None)
+        if any_zh:
+            cand.name_zh = f"{any_zh}（中文名待核实）"
+            filled += 1
+        else:
+            unresolved += 1
+    if filled:
+        warnings.append(f"backfilled Chinese names for {filled} candidate(s); entries marked 待核实 are homonym guesses")
+    if unresolved:
+        warnings.append(f"{unresolved} candidate(s) have no Chinese name in AMiner; shown by English name")
+
+
 def select_profile_portfolio(candidates: list[Candidate], limit: int) -> list[Candidate]:
     """Keep cross-tier bands visible instead of letting reach candidates fill every row."""
     labels = ("冲刺（启发式）", "匹配（启发式）", "相对稳妥（启发式）")
@@ -1137,6 +1172,7 @@ def main() -> None:
             select_profile_portfolio(pool, args.candidate_limit)
             if args.mode == "profile" else pool[: args.candidate_limit]
         )
+        backfill_chinese_names(client, ranked, warnings)
         portfolio_band_counts = dict(Counter(
             candidate.recommendation_band for candidate in ranked if candidate.recommendation_band
         ))
