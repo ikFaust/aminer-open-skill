@@ -908,11 +908,74 @@ def choose_profile_expansion_schools(
     return selected
 
 
+def augment_from_roster(
+    client: AMinerClient, organization: ResolvedOrganization, direction_terms: list[str],
+    existing: dict[str, Candidate], warnings: list[str], *, max_pages: int, direction_evidence: bool,
+) -> None:
+    """Augment paper-reverse recall with the institution scholar roster.
+
+    Paper-reverse recall misses in-faculty PIs whose papers didn't fall into the
+    sampled set (the head-scholar recall gap). This pulls the org scholar roster
+    (org_person_relation, paid) and adds direction-matched scholars not already
+    found. Direction is judged by the scholar's own interests (free person_search),
+    so cross-discipline noise is excluded by construction. Added candidates are
+    tagged identity_resolution='roster' and require the same downstream verification.
+    """
+    if not organization.org_id or max_pages <= 0:
+        return
+    seen_ids = set(existing)
+    seen_names = {normalized_person_name(c.name) for c in existing.values()}
+    seen_names |= {normalized_person_name(c.name_zh) for c in existing.values() if c.name_zh}
+    added = 0
+    for offset in range(0, max_pages * 10, 10):
+        try:
+            rows = unwrap(client.call("org_person_relation", {"org_id": organization.org_id, "offset": offset}))
+        except AMinerAPIError as exc:
+            warnings.append(f"roster augmentation stopped at offset {offset} ({exc.message})")
+            break
+        if not rows:
+            break
+        for row in rows:
+            pid = str(row.get("id") or "")
+            display = str(row.get("name_zh") or row.get("name") or "")
+            key = normalized_person_name(display)
+            if not pid or pid in seen_ids or key in seen_names:
+                continue
+            # Confirm direction from the scholar's own interests (free), org-constrained.
+            people = unwrap(client.call("person_search", {"name": display, "org_id": [organization.org_id], "size": 5}))
+            person = next((p for p in people if str(p.get("org_id") or "") == organization.org_id), None)
+            if not person:
+                continue
+            interests = [str(x) for x in (person.get("interests") or [])]
+            if not (interests and contains_any(" ".join(interests), direction_terms)):
+                continue
+            cand = Candidate(
+                person_id=str(person.get("id") or pid),
+                name=str(person.get("name") or display),
+                name_zh=str(person.get("name_zh") or ""),
+                org=str(person.get("org") or ""),
+                org_zh=str(person.get("org_zh") or ""),
+                org_id=str(person.get("org_id") or organization.org_id),
+                interests=interests,
+                n_citation=person.get("n_citation") if isinstance(person.get("n_citation"), int) else None,
+                identity_resolution="roster",
+            )
+            existing[cand.person_id] = cand
+            seen_ids.add(cand.person_id)
+            seen_names.add(key)
+            added += 1
+    if added:
+        warnings.append(
+            f"roster augmentation added {added} in-faculty scholar(s) matched by interest but missed by paper recall; "
+            "they have no sampled direction paper yet — verify direction on the profile page"
+        )
+
+
 def recommend_for_school(
     client: AMinerClient, school: str, department: str, direction: str, aliases: list[str], paper_limit: int,
     profile: dict[str, Any] | None, max_author_lookups: int, allow_name_fallback: bool,
     verify_roles: int, warnings: list[str], organization_cache: dict[str, ResolvedOrganization | None],
-    include_collaboration: bool, allow_cross_discipline: bool, hired_since: int = 0,
+    include_collaboration: bool, allow_cross_discipline: bool, hired_since: int = 0, roster_pages: int = 0,
 ) -> dict[str, Candidate]:
     organization = organization_cache.get(school)
     if school not in organization_cache:
@@ -943,6 +1006,13 @@ def recommend_for_school(
     for candidate in candidates.values():
         candidate.source_schools.add(school)
     candidates = filter_discipline_conflicts(candidates, terms, allow_cross_discipline, warnings)
+    if roster_pages:
+        augment_from_roster(
+            client, organization, terms, candidates, warnings,
+            max_pages=roster_pages, direction_evidence=False,
+        )
+        for candidate in candidates.values():
+            candidate.source_schools.add(school)
     if include_collaboration:
         enrich_collaboration(client, candidates, details, warnings)
     score_candidates(candidates, terms, school, department, profile)
@@ -1016,6 +1086,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--hired-since", type=int, default=0,
         help="Screen for likely-recent hires since this year; implies person_detail verification for the shortlist",
+    )
+    parser.add_argument(
+        "--roster-pages", type=int, default=0,
+        help="Augment paper recall with N pages of the institution scholar roster (org_person_relation, ¥0.5/page, 10 scholars/page) to recover in-faculty PIs missed by paper sampling",
     )
     parser.add_argument("--max-cost", type=float, default=5.0)
     parser.add_argument("--yes", action="store_true", help="Allow a worst-case estimate above --max-cost")
@@ -1140,7 +1214,7 @@ def main() -> None:
                 found = recommend_for_school(
                     client, school, args.department, args.direction, aliases, args.paper_limit, profile,
                     args.max_author_lookups, args.allow_name_fallback, effective_verify_roles, warnings, organization_cache,
-                    args.mode == "collaboration", args.allow_cross_discipline, args.hired_since,
+                    args.mode == "collaboration", args.allow_cross_discipline, args.hired_since, args.roster_pages,
                 )
             except AMinerAPIError as exc:
                 per_school[school] = 0
