@@ -118,6 +118,8 @@ class Candidate:
     role: str | None = None
     role_unverified: bool = True
     hire_assessment: dict[str, Any] | None = None
+    career: list[dict[str, Any]] = field(default_factory=list)
+    education: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def display_name(self) -> str:
@@ -144,6 +146,8 @@ class Candidate:
             "role": self.role,
             "role_unverified": self.role_unverified,
             "hire_assessment": self.hire_assessment,
+            "career": self.career,
+            "education": self.education,
             "interests": self.interests,
             "n_citation": self.n_citation,
             "evidence_papers": list(self.papers.values()),
@@ -540,8 +544,58 @@ def assess_recent_hire(profile_row: dict[str, Any], since: int) -> dict[str, Any
     return {"status": "no_hire_evidence", "signals": []}
 
 
+def enrich_from_portrait(client: AMinerClient, candidate: Candidate, hired_since: int) -> None:
+    """Pull Scholar Portrait (person/figure, paid) for structured career/education.
+
+    person_detail only exposes a free-text bio; the portrait endpoint returns
+    structured `works` (org + start_year/end_year + position) and `edus`. This
+    (a) records a real career/education timeline — the task-history depth AMiner
+    was wrongly assumed unable to provide — and (b) derives a precise join year
+    for hire screening from the works entry matching the candidate's institution,
+    far more reliable than regex over the bio.
+    """
+    try:
+        rows = unwrap(client.call("person_figure", {"id": candidate.person_id}))
+    except AMinerAPIError:
+        return
+    if not rows:
+        return
+    fig = rows[0]
+
+    def clean(entry: dict[str, Any], role_key: str) -> dict[str, Any]:
+        return {
+            "org": str(entry.get("org") or ""),
+            "department": str(entry.get("department") or ""),
+            "position": str(entry.get(role_key) or entry.get("position_extra") or ""),
+            "start_year": entry.get("start_year"),
+            "end_year": entry.get("end_year"),
+        }
+
+    candidate.career = [clean(w, "position_extra") for w in (fig.get("works") or []) if isinstance(w, dict)][:8]
+    candidate.education = [clean(e, "position_extra") for e in (fig.get("edus") or []) if isinstance(e, dict)][:6]
+
+    if not hired_since or not candidate.org_id:
+        return
+    # Precise join year: earliest works entry whose org matches this institution.
+    org_names = [normalized_text(x) for x in (candidate.org, candidate.org_zh) if x]
+    join_years = [
+        w["start_year"] for w in candidate.career
+        if isinstance(w.get("start_year"), int)
+        and any(name and (name in normalized_text(w["org"]) or normalized_text(w["org"]) in name) for name in org_names)
+    ]
+    if join_years:
+        year = min(join_years)
+        if year >= hired_since:
+            candidate.hire_assessment = {"status": "likely_recent",
+                                         "signals": [f"portrait: joined {candidate.org} in {year}"]}
+        else:
+            candidate.hire_assessment = {"status": "hired_earlier",
+                                         "signals": [f"portrait: joined {candidate.org} in {year}, before {hired_since}"]}
+
+
 def verify_candidate_roles(
-    client: AMinerClient, candidates: dict[str, Candidate], limit: int, warnings: list[str], hired_since: int = 0
+    client: AMinerClient, candidates: dict[str, Candidate], limit: int, warnings: list[str], hired_since: int = 0,
+    with_portrait: bool = False,
 ) -> None:
     ranked = sorted(candidates.values(), key=lambda row: (len(row.papers), row.n_citation or 0), reverse=True)[:limit]
     for candidate in ranked:
@@ -563,6 +617,10 @@ def verify_candidate_roles(
         candidate.role = role or None
         if hired_since:
             candidate.hire_assessment = assess_recent_hire(row, hired_since)
+        if with_portrait:
+            # Structured career/education + precise join year; may override the
+            # bio-regex hire_assessment above with a portrait-derived one.
+            enrich_from_portrait(client, candidate, hired_since)
         if role and contains_any(role, NON_FACULTY_TERMS):
             candidate.role_unverified = True
             candidate.scores["role_conflict"] = 1.0
@@ -1014,6 +1072,7 @@ def recommend_for_school(
     profile: dict[str, Any] | None, max_author_lookups: int, allow_name_fallback: bool,
     verify_roles: int, warnings: list[str], organization_cache: dict[str, ResolvedOrganization | None],
     include_collaboration: bool, allow_cross_discipline: bool, hired_since: int = 0, roster_pages: int = 0,
+    with_portrait: bool = False,
 ) -> dict[str, Candidate]:
     organization = organization_cache.get(school)
     if school not in organization_cache:
@@ -1055,7 +1114,7 @@ def recommend_for_school(
         enrich_collaboration(client, candidates, details, warnings)
     score_candidates(candidates, terms, school, department, profile)
     if verify_roles:
-        verify_candidate_roles(client, candidates, verify_roles, warnings, hired_since)
+        verify_candidate_roles(client, candidates, verify_roles, warnings, hired_since, with_portrait)
         score_candidates(candidates, terms, school, department, profile)
     return candidates
 
@@ -1129,6 +1188,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--roster-pages", type=int, default=0,
         help="Augment paper recall with up to N pages of the institution scholar roster (free person_search org paging, 10 scholars/page) to recover in-faculty PIs missed by paper sampling",
     )
+    parser.add_argument(
+        "--with-portrait", action="store_true",
+        help="For verified candidates, fetch Scholar Portrait (person/figure, ¥0.5 each) for structured career/education history and a precise institution join year; implies --verify-roles",
+    )
     parser.add_argument("--max-cost", type=float, default=5.0)
     parser.add_argument("--yes", action="store_true", help="Allow a worst-case estimate above --max-cost")
     parser.add_argument("--no-auto-expand-profile", action="store_true", help="Search only explicitly selected profile schools")
@@ -1180,7 +1243,7 @@ def main() -> None:
     estimated_school_count = args.max_schools if auto_expand_profile else len(schools)
     # --hired-since needs person_detail evidence for the shortlist, so it implies
     # role verification even when --verify-roles was not raised explicitly.
-    effective_verify_roles = max(args.verify_roles, args.candidate_limit if args.hired_since else 0)
+    effective_verify_roles = max(args.verify_roles, args.candidate_limit if (args.hired_since or args.with_portrait) else 0)
     estimate = estimate_cost(
         args.mode, estimated_school_count, min(3, 1 + len(aliases)), args.paper_limit, effective_verify_roles,
         profile_discovery=auto_expand_profile,
@@ -1253,6 +1316,7 @@ def main() -> None:
                     client, school, args.department, args.direction, aliases, args.paper_limit, profile,
                     args.max_author_lookups, args.allow_name_fallback, effective_verify_roles, warnings, organization_cache,
                     args.mode == "collaboration", args.allow_cross_discipline, args.hired_since, args.roster_pages,
+                    args.with_portrait,
                 )
             except AMinerAPIError as exc:
                 per_school[school] = 0
