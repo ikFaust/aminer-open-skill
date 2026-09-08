@@ -908,6 +908,39 @@ def choose_profile_expansion_schools(
     return selected
 
 
+def interest_matches_direction(interests: list[str], direction_terms: list[str]) -> bool:
+    """Looser match for roster augmentation: a scholar's interest tag counts as
+    on-direction if it shares enough salient word-stems with a direction term.
+
+    AMiner interest tags use different word forms than query aliases
+    ("Language Modeling" vs "large language model"), so exact substring matching
+    misses real matches. Compare on stemmed content words instead: require every
+    content word of some (>=2-word) direction phrase to appear as a token stem in
+    the interests, or a direct substring hit for short/Chinese terms.
+    """
+    if not interests:
+        return False
+    blob = normalized_text(" ".join(interests))
+    if contains_any(blob, direction_terms):
+        return True
+    STOP = {"the", "a", "of", "for", "and", "based", "large", "deep", "using"}
+
+    def stems(text: str) -> set[str]:
+        out = set()
+        for w in re.findall(r"[a-z]{3,}", normalized_text(text)):
+            if w in STOP:
+                continue
+            out.add(w[:-1] if w.endswith("s") else w)          # crude singular
+            out.add(w[:-3] if w.endswith("ing") and len(w) > 5 else w)  # model(ing)
+        return out
+    itok = stems(blob)
+    for term in direction_terms:
+        words = [w for w in re.findall(r"[a-z]{3,}", normalized_text(term)) if w not in STOP]
+        if len(words) >= 2 and all(any(s.startswith(w[:5]) or w.startswith(s[:5]) for s in itok) for w in words):
+            return True
+    return False
+
+
 def augment_from_roster(
     client: AMinerClient, organization: ResolvedOrganization, direction_terms: list[str],
     existing: dict[str, Candidate], warnings: list[str], *, max_pages: int, direction_evidence: bool,
@@ -915,11 +948,13 @@ def augment_from_roster(
     """Augment paper-reverse recall with the institution scholar roster.
 
     Paper-reverse recall misses in-faculty PIs whose papers didn't fall into the
-    sampled set (the head-scholar recall gap). This pulls the org scholar roster
-    (org_person_relation, paid) and adds direction-matched scholars not already
-    found. Direction is judged by the scholar's own interests (free person_search),
-    so cross-discipline noise is excluded by construction. Added candidates are
-    tagged identity_resolution='roster' and require the same downstream verification.
+    sampled set (the head-scholar recall gap). This pages the free person_search
+    endpoint by org_id (undocumented: offset paging works and reaches high-citation
+    PIs the paper sample misses) and adds direction-matched scholars not already
+    found. Direction is judged by each scholar's own interests, so cross-discipline
+    noise is excluded by construction. Added candidates are tagged
+    identity_resolution='roster' and require the same downstream verification.
+    Free: person_search costs nothing, so paging carries no API charge.
     """
     if not organization.org_id or max_pages <= 0:
         return
@@ -927,30 +962,33 @@ def augment_from_roster(
     seen_names = {normalized_person_name(c.name) for c in existing.values()}
     seen_names |= {normalized_person_name(c.name_zh) for c in existing.values() if c.name_zh}
     added = 0
+    empty_streak = 0
     for offset in range(0, max_pages * 10, 10):
         try:
-            rows = unwrap(client.call("org_person_relation", {"org_id": organization.org_id, "offset": offset}))
+            rows = unwrap(client.call("person_search", {"org_id": [organization.org_id], "size": 10, "offset": offset}))
         except AMinerAPIError as exc:
             warnings.append(f"roster augmentation stopped at offset {offset} ({exc.message})")
             break
-        if not rows:
-            break
-        for row in rows:
-            pid = str(row.get("id") or "")
-            display = str(row.get("name_zh") or row.get("name") or "")
+        new_rows = [r for r in rows if str(r.get("id") or "") not in seen_ids]
+        if not rows or (not new_rows and offset > 0):
+            empty_streak += 1
+            if empty_streak >= 2:  # roster exhausted (paging returns only dupes)
+                break
+            continue
+        empty_streak = 0
+        for person in rows:
+            pid = str(person.get("id") or "")
+            if str(person.get("org_id") or "") != organization.org_id:
+                continue
+            display = str(person.get("name_zh") or person.get("name") or "")
             key = normalized_person_name(display)
             if not pid or pid in seen_ids or key in seen_names:
                 continue
-            # Confirm direction from the scholar's own interests (free), org-constrained.
-            people = unwrap(client.call("person_search", {"name": display, "org_id": [organization.org_id], "size": 5}))
-            person = next((p for p in people if str(p.get("org_id") or "") == organization.org_id), None)
-            if not person:
-                continue
             interests = [str(x) for x in (person.get("interests") or [])]
-            if not (interests and contains_any(" ".join(interests), direction_terms)):
+            if not interest_matches_direction(interests, direction_terms):
                 continue
             cand = Candidate(
-                person_id=str(person.get("id") or pid),
+                person_id=pid,
                 name=str(person.get("name") or display),
                 name_zh=str(person.get("name_zh") or ""),
                 org=str(person.get("org") or ""),
@@ -960,14 +998,14 @@ def augment_from_roster(
                 n_citation=person.get("n_citation") if isinstance(person.get("n_citation"), int) else None,
                 identity_resolution="roster",
             )
-            existing[cand.person_id] = cand
-            seen_ids.add(cand.person_id)
+            existing[pid] = cand
+            seen_ids.add(pid)
             seen_names.add(key)
             added += 1
     if added:
         warnings.append(
             f"roster augmentation added {added} in-faculty scholar(s) matched by interest but missed by paper recall; "
-            "they have no sampled direction paper yet — verify direction on the profile page"
+            "verify direction on the profile page"
         )
 
 
@@ -1089,7 +1127,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--roster-pages", type=int, default=0,
-        help="Augment paper recall with N pages of the institution scholar roster (org_person_relation, ¥0.5/page, 10 scholars/page) to recover in-faculty PIs missed by paper sampling",
+        help="Augment paper recall with up to N pages of the institution scholar roster (free person_search org paging, 10 scholars/page) to recover in-faculty PIs missed by paper sampling",
     )
     parser.add_argument("--max-cost", type=float, default=5.0)
     parser.add_argument("--yes", action="store_true", help="Allow a worst-case estimate above --max-cost")
