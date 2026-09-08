@@ -16,16 +16,20 @@ from recommend import (  # noqa: E402
     applicant_readiness,
     assess_recent_hire,
     assign_bands,
+    augment_from_roster,
+    backfill_chinese_names,
     build_rank_key,
     classify_org,
     clean_paper,
     choose_profile_expansion_schools,
     discover_institutions,
     enrich_collaboration,
+    enrich_from_portrait,
     estimate_cost,
     extract_institution_name,
     filter_discipline_conflicts,
     institution_level,
+    interest_matches_direction,
     is_mainland_china_institution,
     mark_duplicate_names,
     recommend_for_school,
@@ -453,6 +457,128 @@ class RecommendationLogicTests(unittest.TestCase):
         )
         self.assertEqual(result, {})
         self.assertIn("official English name or discover mode", warnings[0])
+
+
+class ScriptedClient:
+    """Fake client returning canned payloads per API, keyed by call order or a handler."""
+
+    def __init__(self, handlers):
+        # handlers: dict api -> callable(params)->rows  OR  api -> list-of-rows (rotated)
+        self.handlers = handlers
+        self.calls = []
+
+    def call(self, api, params):
+        self.calls.append((api, dict(params)))
+        h = self.handlers.get(api)
+        if h is None:
+            raise AssertionError(f"unexpected API: {api}")
+        rows = h(params) if callable(h) else h
+        return {"success": True, "code": 200, "data": rows}
+
+
+class InterestMatchTests(unittest.TestCase):
+    def test_loose_match_hits_reworded_direction(self):
+        terms = ["大模型", "large language model", "大语言模型"]
+        self.assertTrue(interest_matches_direction(["Language Modeling", "Topic Modeling"], terms))
+        self.assertTrue(interest_matches_direction(["Neural Machine Translation"], ["机器翻译", "machine translation"]))
+
+    def test_rejects_offdirection_and_empty(self):
+        terms = ["大模型", "large language model"]
+        self.assertFalse(interest_matches_direction(["Power System", "Electricity Market"], terms))
+        self.assertFalse(interest_matches_direction(["Monte Carlo", "Heat Transfer"], terms))
+        self.assertFalse(interest_matches_direction([], terms))
+
+    def test_direct_substring_still_matches(self):
+        self.assertTrue(interest_matches_direction(["Computer Vision", "Detection"], ["computer vision"]))
+
+
+class BackfillChineseNamesTests(unittest.TestCase):
+    def test_same_org_chinese_name_filled(self):
+        cand = Candidate(person_id="p1", name="Wei Ye", name_zh="", org_id="org-1")
+        client = ScriptedClient({"person_search": [
+            {"name": "Wei Ye", "name_zh": "叶蔚", "org_id": "org-1"},
+            {"name": "Wei Ye", "name_zh": "韦烨", "org_id": "org-9"},
+        ]})
+        backfill_chinese_names(client, [cand], [])
+        self.assertEqual(cand.name_zh, "叶蔚")
+
+    def test_homonym_flagged_when_only_other_org(self):
+        cand = Candidate(person_id="p1", name="Bowen Cao", name_zh="", org_id="org-1")
+        client = ScriptedClient({"person_search": [
+            {"name": "Bowen Cao", "name_zh": "曹博文", "org_id": "org-other"},
+        ]})
+        backfill_chinese_names(client, [cand], [])
+        self.assertIn("曹博文", cand.name_zh)
+        self.assertIn("待核实", cand.name_zh)
+
+    def test_unresolved_and_already_named_are_skipped(self):
+        unresolved = Candidate(person_id="unresolved:x", name="Di He", name_zh="", org_id="org-1")
+        named = Candidate(person_id="p2", name="Yang Yu", name_zh="俞扬", org_id="org-1")
+
+        class Boom:
+            def call(self, api, params):
+                raise AssertionError("must not query for skipped candidates")
+
+        backfill_chinese_names(Boom(), [unresolved, named], [])
+        self.assertEqual(unresolved.name_zh, "")
+        self.assertEqual(named.name_zh, "俞扬")
+
+
+class RosterAugmentTests(unittest.TestCase):
+    def _org(self):
+        return ResolvedOrganization("清华大学", "org-1", "Tsinghua University", ["清华大学"])
+
+    def test_adds_direction_matched_scholar_missed_by_papers(self):
+        pages = {0: [{"id": "s1", "name": "Zhiyuan Liu", "name_zh": "刘知远", "org_id": "org-1",
+                      "interests": ["Language Modeling", "Topic Modeling"], "n_citation": 85000}],
+                 10: []}
+        client = ScriptedClient({"person_search": lambda p: pages.get(p.get("offset", 0), [])})
+        existing = {}
+        augment_from_roster(client, self._org(), ["大模型", "large language model"], existing, [],
+                            max_pages=3, direction_evidence=False)
+        self.assertIn("s1", existing)
+        self.assertEqual(existing["s1"].identity_resolution, "roster")
+
+    def test_skips_offdirection_and_duplicates(self):
+        existing = {"a1": Candidate(person_id="a1", name="Fuchun Sun", name_zh="孙富春", org_id="org-1")}
+        pages = {0: [
+            {"id": "a1", "name": "Fuchun Sun", "name_zh": "孙富春", "org_id": "org-1", "interests": ["Robotics"]},  # dup
+            {"id": "n1", "name": "Kang X", "name_zh": "康重庆", "org_id": "org-1", "interests": ["Power System"]},  # off-dir
+        ], 10: []}
+        client = ScriptedClient({"person_search": lambda p: pages.get(p.get("offset", 0), [])})
+        augment_from_roster(client, self._org(), ["大模型", "large language model"], existing, [],
+                            max_pages=2, direction_evidence=False)
+        self.assertEqual(set(existing), {"a1"})  # nothing added
+
+
+class PortraitEnrichTests(unittest.TestCase):
+    def test_precise_join_year_from_works(self):
+        cand = Candidate(person_id="p1", name="Yuncheng Wu", org="Renmin University of China", org_id="org-1")
+        client = ScriptedClient({"person_figure": [{
+            "works": [{"org": "Renmin University of China", "start_year": 2024, "position_extra": "副教授"},
+                      {"org": "National University of Singapore", "start_year": 2021, "end_year": 2024, "position_extra": "助理教授"}],
+            "edus": [{"org": "NUS", "start_year": 2015, "end_year": 2019}],
+        }]})
+        enrich_from_portrait(client, cand, hired_since=2020)
+        self.assertEqual(len(cand.career), 2)
+        self.assertEqual(cand.hire_assessment["status"], "likely_recent")
+        self.assertIn("2024", cand.hire_assessment["signals"][0])
+
+    def test_join_before_window_is_hired_earlier(self):
+        cand = Candidate(person_id="p1", name="X", org="Tsinghua University", org_id="org-1")
+        client = ScriptedClient({"person_figure": [{
+            "works": [{"org": "Tsinghua University", "start_year": 2010, "position_extra": "教授"}]}]})
+        enrich_from_portrait(client, cand, hired_since=2020)
+        self.assertEqual(cand.hire_assessment["status"], "hired_earlier")
+
+    def test_sparse_works_leaves_hire_assessment_untouched(self):
+        cand = Candidate(person_id="p1", name="X", org="Shanghai Jiao Tong University", org_id="org-1")
+        cand.hire_assessment = {"status": "no_hire_evidence", "signals": []}
+        client = ScriptedClient({"person_figure": [{
+            "works": [{"org": "National University of Singapore", "position_extra": "研究员"}]}]})  # no year, no home org
+        enrich_from_portrait(client, cand, hired_since=2020)
+        self.assertEqual(cand.hire_assessment["status"], "no_hire_evidence")  # safe fallback
+        self.assertEqual(len(cand.career), 1)  # career still recorded
 
 
 if __name__ == "__main__":
