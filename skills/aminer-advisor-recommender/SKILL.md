@@ -32,7 +32,7 @@ For applicant matching, read [references/applicant-schema.md](references/applica
 
 ## Collect candidates
 
-1. Normalize the requested research direction into the user's wording plus a small set of English/Chinese aliases.
+1. **Expand the research direction before searching (critical for recall).** AMiner is an English-first corpus, so a bare Chinese or single-phrase direction under-recalls badly (e.g. 具身智能 alone returned 1 wrong candidate; `robot learning` + embodied/manipulation/navigation/legged recovered the core PIs 王越/熊蓉). Pass `--aliases` as a deliberate query expansion covering: (a) the English name(s) of the direction, (b) the Chinese name, (c) 2–5 subfield/near-synonym terms actually used in paper titles and scholar interests. Examples: 具身智能 → `embodied AI,embodied intelligence,robot learning,manipulation,navigation,legged`; 大模型 → `large language model,LLM,language modeling,pretraining,instruction tuning`; 多模态 → `multimodal,vision-language,MLLM,image-text`. Use your own domain knowledge to build this set — do not rely on the user to list every term. Prefer the English name as the primary `--direction` for niche/emerging topics.
 2. Resolve institutions to canonical AMiner organization IDs before resolving people. Treat department matching as unverified when AMiner lacks department-level data.
 3. Search broadly with free or low-cost endpoints, then fetch deeper evidence only for a short list. Default to 10 candidates unless the user specifies otherwise.
 4. Link paper authors only when their paper affiliation matches the resolved organization ID. Then require exact name and exact organization in `person_search`. If several profiles still match, return one unresolved identity with alternate IDs and no fabricated profile URL.
