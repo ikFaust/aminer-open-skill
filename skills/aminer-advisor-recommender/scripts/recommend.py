@@ -45,6 +45,18 @@ CROSS_DISCIPLINE_AFFILIATION_TERMS = (
     "考古", "化学学院", "化工学院", "资源环境",
 )
 
+# Off-field topics that appear in a scholar's OWN interests (not affiliation).
+# Blacklist of clearly-unrelated disciplines seen contaminating recall via
+# multi-author papers. Kept deliberately conservative — only add a term when it
+# is almost never a CS/AI subfield, so real subfields are never removed.
+CROSS_DISCIPLINE_INTEREST_TERMS = (
+    "clinical", "prenatal", "cancer", "tumor", "surgery", "gut microbiota", "epidemiology",
+    "reactor", "nuclear", "monte carlo", "combustion", "pyrolysis", "catalysis", "photocatalysis",
+    "urban planning", "architecture", "seagrass", "climate change", "batteries", "lithium",
+    "nanocryst", "quantum dot", "supramolecular", "metal-organic", "silicon", "photonic",
+    "临床", "产前", "肿瘤", "癌", "反应堆", "核", "燃烧", "催化", "城市规划", "建筑", "电池", "材料",
+)
+
 
 def normalized_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
@@ -511,6 +523,46 @@ def filter_discipline_conflicts(
         preview = "; ".join(removed[:5])
         suffix = f"; and {len(removed) - 5} more" if len(removed) > 5 else ""
         warnings.append(f"filtered {len(removed)} obvious cross-discipline affiliations: {preview}{suffix}")
+    return kept
+
+
+def filter_by_interest_mismatch(
+    candidates: dict[str, Candidate], direction_terms: list[str], warnings: list[str],
+) -> dict[str, Candidate]:
+    """Drop paper-recalled candidates whose OWN interests hit a clearly off-field topic.
+
+    Paper-reverse recall pulls every author of a direction-matched paper, so a
+    co-author from another discipline slips in (a 城市规划/核工程/临床 author on a
+    paper whose title mentions the direction; the affiliation blacklist misses
+    them when their org string isn't obviously 'hospital' etc.).
+
+    Design note (learned the hard way): we use a BLACKLIST here, not a whitelist.
+    Whitelisting ("keep only if interests positively match the direction") is a
+    disaster for broad fields — for CV it wrongly deletes SLAM / pose / tracking /
+    3D / re-id / super-resolution scholars, because "what counts as CV" is an open
+    set impossible to enumerate. "What is clearly NOT this field" (clinical
+    medicine, nuclear, urban planning, materials, …) is a small closed set, so a
+    blacklist removes true noise without harming subfields. Empty interests and
+    roster candidates are left untouched.
+    """
+    kept: dict[str, Candidate] = {}
+    removed: list[str] = []
+    for person_id, candidate in candidates.items():
+        if candidate.identity_resolution == "roster" or not candidate.interests:
+            kept[person_id] = candidate
+            continue
+        interests_text = " ".join(candidate.interests)
+        # Remove only when interests clearly hit an off-field discipline AND show
+        # no sign of the requested direction.
+        if (contains_any(interests_text, CROSS_DISCIPLINE_INTEREST_TERMS)
+                and not interest_matches_direction(candidate.interests, direction_terms)):
+            removed.append(f"{candidate.display_name}[{','.join(candidate.interests[:2])}]")
+        else:
+            kept[person_id] = candidate
+    if removed:
+        preview = "; ".join(removed[:5])
+        suffix = f"; and {len(removed) - 5} more" if len(removed) > 5 else ""
+        warnings.append(f"filtered {len(removed)} candidate(s) whose own interests are clearly off-field: {preview}{suffix}")
     return kept
 
 
@@ -1072,7 +1124,7 @@ def recommend_for_school(
     profile: dict[str, Any] | None, max_author_lookups: int, allow_name_fallback: bool,
     verify_roles: int, warnings: list[str], organization_cache: dict[str, ResolvedOrganization | None],
     include_collaboration: bool, allow_cross_discipline: bool, hired_since: int = 0, roster_pages: int = 0,
-    with_portrait: bool = False,
+    with_portrait: bool = False, candidate_limit: int = 10,
 ) -> dict[str, Candidate]:
     organization = organization_cache.get(school)
     if school not in organization_cache:
@@ -1100,9 +1152,46 @@ def recommend_for_school(
     candidates = resolve_people(
         client, papers, details, organization, terms, max_author_lookups, allow_name_fallback, warnings
     )
+    # Global fallback: paper_search_pro's org filter drops all papers for many
+    # specific/niche directions (e.g. "optical fiber communication" @ Nankai
+    # returns 0 papers), so the org-scoped path above yields nothing even when the
+    # school clearly works in the area. When we fell short of the requested count,
+    # re-run the paper search WITHOUT the org filter (global by direction) over a
+    # wider window and let resolve_people's author-affiliation filter keep only
+    # this school's authors. A school's contribution to a global direction is a
+    # needle in a haystack, so scan more papers here than the org-scoped pass.
+    if len(candidates) < candidate_limit:
+        global_size = max(paper_limit, 60)
+        global_rows: dict[str, dict[str, Any]] = dict(search_rows)
+        for term in terms:
+            for row in paper_search(client, term, None, global_size):
+                pid = str(row.get("id") or "")
+                if pid:
+                    global_rows.setdefault(pid, row)
+        if len(global_rows) > len(search_rows):
+            g_info = batch_paper_info(client, list(global_rows), warnings)
+            g_info_by_id = {str(row.get("id")): row for row in g_info if row.get("id")}
+            g_details = fetch_paper_details(client, list(global_rows), len(global_rows), warnings)
+            g_papers = [dict(global_rows[pid], **g_info_by_id.get(pid, {})) for pid in global_rows]
+            g_candidates = resolve_people(
+                client, g_papers, g_details, organization, terms, max_author_lookups,
+                allow_name_fallback, warnings,
+            )
+            added = 0
+            for key, cand in g_candidates.items():
+                if key not in candidates:
+                    candidates[key] = cand
+                    added += 1
+            if added:
+                warnings.append(
+                    f"global direction fallback added {added} author(s) at {school} "
+                    f"(org-scoped paper search returned too few)"
+                )
     for candidate in candidates.values():
         candidate.source_schools.add(school)
     candidates = filter_discipline_conflicts(candidates, terms, allow_cross_discipline, warnings)
+    if not allow_cross_discipline:
+        candidates = filter_by_interest_mismatch(candidates, terms, warnings)
     if roster_pages:
         augment_from_roster(
             client, organization, terms, candidates, warnings,
@@ -1316,7 +1405,7 @@ def main() -> None:
                     client, school, args.department, args.direction, aliases, args.paper_limit, profile,
                     args.max_author_lookups, args.allow_name_fallback, effective_verify_roles, warnings, organization_cache,
                     args.mode == "collaboration", args.allow_cross_discipline, args.hired_since, args.roster_pages,
-                    args.with_portrait,
+                    args.with_portrait, args.candidate_limit,
                 )
             except AMinerAPIError as exc:
                 per_school[school] = 0

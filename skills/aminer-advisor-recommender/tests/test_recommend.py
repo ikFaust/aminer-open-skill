@@ -27,6 +27,7 @@ from recommend import (  # noqa: E402
     enrich_from_portrait,
     estimate_cost,
     extract_institution_name,
+    filter_by_interest_mismatch,
     filter_discipline_conflicts,
     institution_level,
     interest_matches_direction,
@@ -458,6 +459,38 @@ class RecommendationLogicTests(unittest.TestCase):
         self.assertEqual(result, {})
         self.assertIn("official English name or discover mode", warnings[0])
 
+    def test_global_fallback_recovers_when_org_scoped_search_is_empty(self):
+        # paper_search_pro with an `org` filter returns nothing (the real API drops
+        # papers for many niche directions), but a global search surfaces a paper
+        # whose author is affiliated to the target school. The fallback should
+        # recover that author instead of returning an empty result.
+        detail = {
+            "id": "p1", "title": "Optical Fiber Communication Advances", "year": 2025,
+            "authors": [{"name": "Fiber Author", "org": "Nankai University", "orgid": "dept9"}],
+        }
+
+        def paper_search_pro(params):
+            # org-scoped call -> empty; global call (no org) -> one paper
+            return [] if params.get("org") else [{"id": "p1", "title": detail["title"], "year": 2025}]
+
+        client = ScriptedClient({
+            "org_search": [{"org_id": "school1", "org_name": "Nankai University", "aliases": []}],
+            "paper_search_pro": paper_search_pro,
+            "paper_info": [{"id": "p1", "title": detail["title"], "year": 2025}],
+            "paper_detail": [detail],
+            "person_search": [{"id": "person1", "name": "Fiber Author", "org": "Nankai University", "org_id": "school1"}],
+        })
+        warnings = []
+        result = recommend_for_school(
+            client, "Nankai University", "", "optical fiber communication", [], 5, None, 10, False, 0,
+            warnings, {}, False, False, 0, 0, False, 10,
+        )
+        self.assertEqual(len(result), 1)
+        self.assertTrue(any("global direction fallback added" in w for w in warnings))
+        # a global (org-unfiltered) paper_search_pro call must have happened
+        self.assertTrue(any(api == "paper_search_pro" and not p.get("org") for api, p in client.calls))
+
+
 
 class ScriptedClient:
     """Fake client returning canned payloads per API, keyed by call order or a handler."""
@@ -474,6 +507,28 @@ class ScriptedClient:
             raise AssertionError(f"unexpected API: {api}")
         rows = h(params) if callable(h) else h
         return {"success": True, "code": 200, "data": rows}
+
+
+class InterestMismatchFilterTests(unittest.TestCase):
+    def test_drops_offfield_keeps_cv_subfields_and_empty(self):
+        terms = ["computer vision", "计算机视觉", "object detection"]
+        # CV subfields must be KEPT even though they don't literally say "vision"
+        slam = Candidate(person_id="p1", name="SLAM Prof", interests=["Simultaneous Localization And Mapping"])
+        reid = Candidate(person_id="p2", name="ReID Prof", interests=["Vehicle Re-Identification"])
+        # clearly off-field co-authors must be DROPPED
+        urban = Candidate(person_id="p3", name="Huang", interests=["Urban Planning", "Architecture"])
+        nuclear = Candidate(person_id="p4", name="Huang2", interests=["Monte Carlo", "Reactor Physics"])
+        clinical = Candidate(person_id="p5", name="Chen", interests=["Prenatal Diagnosis", "Cancer Risk"])
+        no_interest = Candidate(person_id="p6", name="Unknown", interests=[])
+        out = filter_by_interest_mismatch(
+            {c.person_id: c for c in [slam, reid, urban, nuclear, clinical, no_interest]}, terms, []
+        )
+        self.assertEqual(set(out), {"p1", "p2", "p6"})  # CV subfields + empty kept; off-field dropped
+
+    def test_roster_candidates_never_dropped(self):
+        r = Candidate(person_id="r1", name="X", interests=["Nuclear"], identity_resolution="roster")
+        out = filter_by_interest_mismatch({"r1": r}, ["computer vision"], [])
+        self.assertEqual(set(out), {"r1"})
 
 
 class InterestMatchTests(unittest.TestCase):
