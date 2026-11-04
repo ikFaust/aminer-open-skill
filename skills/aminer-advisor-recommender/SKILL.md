@@ -1,8 +1,9 @@
 ---
 name: aminer-advisor-recommender
-version: 1.0.0
-author: AMiner
-contact: report@aminer.cn
+metadata:
+  version: 1.0.0
+  author: AMiner
+  contact: report@aminer.cn
 description: >
   Discover Chinese institutions by research direction and recommend prospective advisors using AMiner evidence and an applicant profile. Use when a user asks which institutions are active in a direction; asks for advisors in a named university, school, or direction; filters by tiers such as 华五/985/211/双一流; compares publication-based academic or industry collaboration breadth; or wants heuristic reach/match/safer school and advisor suggestions based on undergraduate institution, grades, research, projects, publications, internships, degree target, and location preferences. Also triggers on Chinese requests such as 考研/保研/申博择校、推荐导师、找导师、选导师、某方向哪些学校强.
 ---
@@ -20,6 +21,7 @@ Choose one workflow:
 3. **Tier and direction**: direction + 华五/985/211/双一流 or a user-provided school set -> institution and prospective advisor candidates.
 4. **Collaboration breadth**: direction/institution -> candidates -> coauthors and affiliations -> academic/industry collaboration comparison.
 5. **Applicant matching**: applicant profile -> direction-based school discovery -> cross-tier heuristic portfolio -> prospective advisor candidates.
+6. **Person deep-dive**: one or more scholar names -> disambiguated profile(s) with position, interests, recent papers, citations (and comparison table when several names are given). Use this whenever the user names specific advisor(s) and asks what they work on / how they compare / to help draft an outreach (套磁) letter — this is the most common real request and is the inverse of the direction-based modes above. Do NOT answer a named-scholar question by running direction search.
 
 For applicant matching, read [references/applicant-schema.md](references/applicant-schema.md). For ranking or collaboration analysis, read [references/scoring-rubric.md](references/scoring-rubric.md). For school-tier filters, read [references/school-tiers.md](references/school-tiers.md). Before calling AMiner, read [references/api-workflows.md](references/api-workflows.md).
 
@@ -27,18 +29,19 @@ For applicant matching, read [references/applicant-schema.md](references/applica
 
 1. Check whether `AMINER_API_KEY` exists without printing its value. Stop and direct the user to the AMiner console if it is missing.
 2. Send the token unchanged in the `Authorization` header and send `X-Platform: openclaw`.
-3. Use only endpoints and parameters documented in `references/api-workflows.md` or the repository's canonical API catalog. Never invent an endpoint or field.
+3. Use only endpoints and parameters documented in `references/api-workflows.md` and `scripts/aminer_client.py`. Never invent an endpoint or field.
 4. Estimate cost before calling paid endpoints. Ask for confirmation before a planned chain costing at least ¥5.00.
 
 ## Collect candidates
 
 1. **Expand the research direction before searching (critical for recall).** AMiner is an English-first corpus, so a bare Chinese or single-phrase direction under-recalls badly (e.g. 具身智能 alone returned 1 wrong candidate; `robot learning` + embodied/manipulation/navigation/legged recovered the core PIs 王越/熊蓉). Pass `--aliases` as a deliberate query expansion covering: (a) the English name(s) of the direction, (b) the Chinese name, (c) 2–5 subfield/near-synonym terms actually used in paper titles and scholar interests. Examples: 具身智能 → `embodied AI,embodied intelligence,robot learning,manipulation,navigation,legged`; 大模型 → `large language model,LLM,language modeling,pretraining,instruction tuning`; 多模态 → `multimodal,vision-language,MLLM,image-text`. Use your own domain knowledge to build this set — do not rely on the user to list every term. Prefer the English name as the primary `--direction` for niche/emerging topics.
-2. Resolve institutions to canonical AMiner organization IDs before resolving people. Treat department matching as unverified when AMiner lacks department-level data.
+2. Resolve the **first-level university ID** before paper search. For a combined school/department string, use `org_disambiguate_pro` to separate `一级ID` from `二级ID`; if that fails, extract the explicit university name and resolve it separately. Never pass a department ID as the school ID. In `paper_qa_search`, send `org_id` with `query`, without `org_terms`: combining `org_id` and `org_terms` widens results by OR, not AND. Treat department matching as unverified until an official department page confirms it.
 3. Search broadly with free or low-cost endpoints, then fetch deeper evidence only for a short list. Default to 10 candidates unless the user specifies otherwise.
-4. Link paper authors only when their paper affiliation matches the resolved organization ID. Then require exact name and exact organization in `person_search`. If several profiles still match, return one unresolved identity with alternate IDs and no fabricated profile URL.
+4. Link paper authors only when their paper affiliation matches the resolved university ID or names the university despite a department-level author ID. Then require exact name and university in `person_search`. If several profiles still match, return one unresolved identity with alternate IDs and no fabricated profile URL.
 5. Use recent publications to verify direction fit. Prefer a five-year window unless the user requests another period.
 6. Build collaboration evidence from coauthors and their affiliations. Do not infer an industry relationship from an email domain or model knowledge alone.
 7. Require every candidate to have at least one non-empty, dated, direction-matched paper. Preserve source identifiers, AMiner URLs, years, and the API used for every factual claim.
+8. In multi-school advisor tasks, run the bounded search once. If the resulting shortlist has `role_unverified: true`, verify only the finalists' person IDs with `person_detail` (`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/aminer_client.py" --api person_detail --params '{"id":"PERSON_ID"}'`) and check the official faculty/admissions page for department and supervisor eligibility. The shared `call_aminer_api` wrapper, when used, takes `person_id` instead of the raw HTTP `id` parameter. Do not rerun all schools with larger paper, author, and candidate limits just to verify a few roles; a broad retry can exceed the script time limit. A faculty title alone does not prove current graduate-supervisor eligibility.
 
 ## Run workflows
 
@@ -55,6 +58,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/recommend.py" \
 ```
 
 Treat the output as AMiner coverage within the inspected paper sample, not a national university ranking. Feed selected institutions into `named`, `collaboration`, or `profile` mode.
+
+For a question comparing which schools are active, use the first pass only to form a candidate set. Include plausible schools from the user's scope and field knowledge even when the global sample missed them. Then rerun `discover` with `--schools "清华大学,上海交通大学,浙江大学,北京大学,北京航空航天大学"` (replace with the actual candidates), the same direction aliases and paper limit. The second pass resolves each school's first-level ID, applies the same query terms and five-year window, and checks author affiliations for at most eight papers per school sampled across aliases. Report the schools examined, inspected counts, evidence papers and omissions. These counts describe the inspected sample; do not call them a national ranking or infer that an unexamined school is inactive.
 
 ### 2. Named school, department, and direction
 
@@ -112,14 +117,38 @@ Do not store the applicant file inside the skill unless the user explicitly asks
 
 By default, profile mode uses AMiner direction evidence to add lower-tier institutions when capacity remains under `--max-schools`. It then reserves output space for every available reach/match/safer band, instead of allowing high-scoring reach candidates to fill the whole result. Use `--no-auto-expand-profile` only when the user explicitly wants a closed school list. Automatic additions are candidate schools from the inspected AMiner sample, not admissions guarantees or a complete national ranking; if a band has no evidence-backed candidate, report it as missing rather than fabricating one.
 
+### 6. Person deep-dive and comparison
+
+When the user names specific scholar(s), deep-dive the person(s) directly. If they also name a research focus, include that focus and its title-language aliases so the paper search does not stop at a generic by-name list:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/recommend.py" \
+  --mode person \
+  --names "刘付成" \
+  --school "上海交通大学" \
+  --direction "attitude control" \
+  --aliases "spacecraft attitude control,卫星姿态控制" \
+  --verify-roles 5
+```
+
+- `--names` takes one name, or several comma-separated for a **comparison** (`--names "孙栩,张铭,李戈"`), each returned as its own profile block.
+- `--school` is optional and only aids disambiguation.
+- `--direction` and `--aliases` are optional in person mode. With a focus, the script extracts the first-level university from the scholar's possibly long affiliation, uses title-and-keyword `query`, checks each result's same-name author against the selected scholar's university affiliation in `paper_detail`, and stops after enough papers or three search terms. If this has no recent direction paper, it uses the selected person's ID in `person_paper_relation`, verifies publication years through `paper_info`, and labels that source; a paper signed at a previous institution can then be recovered. ID-linked papers outside the stated focus are retained only as broader recent work with `topic_match: false`, never as evidence of the focus. The relation is person-ID evidence, but publication status and original affiliation still need source checking. It will not choose a different university's namesake just because that profile has more citations.
+- `--deep` adds `person_detail` (¥1/person) for position/education/honors. The ID-linked paper fallback can add ¥1.50/person; `--max-cost` applies to person mode and the cost estimate covers that fallback.
+- In general by-name searches, papers with low overlap against the scholar's interests are flagged `topic_match: false` (possible same-name mixin). For a focused search, papers whose author affiliation does not match the selected university are excluded; `topic_match` requires the distinctive terms of the requested focus (for example `code reasoning`, not just `LLM`). Broad aliases improve recall but do not establish direction fit. Lead with verified focus papers and treat any flagged general-search papers as needs-verification.
+- AMiner has no admissions/employment-status data: always tell the user to verify current recruiting and affiliation on the official page.
+
+**Drafting an outreach (套磁) letter**: this is a natural follow-up, not a separate API. Use only the real evidence from the person deep-dive (the scholar's genuine interests and `topic_match: true` recent papers) plus the applicant's own background. Ground every advisor-specific claim in the profile (cite a real interest or paper), never invent results, exclude flagged mixin papers, use placeholders for applicant facts the user must fill, and close by advising the user to confirm the advisor's current recruiting status.
+
 ## Control retrieval
 
 - `--paper-limit`: papers returned per direction/school query; default 10.
-- `--max-author-lookups`: distinct paper-author names resolved per school; default 30.
+- School-specific paper search first uses university-ID-filtered `paper_qa_search`, then one name-filtered `paper_search_pro` fallback when empty. Details are capped per school and sampled across aliases. Only if no candidate survives does a bounded global direction pass inspect further papers, with author affiliations checked. Stop after these passes and report remaining coverage gaps instead of repeatedly widening retrieval.
+- `--max-author-lookups`: distinct paper-author names resolved per school; default 12. Independent author and paper-detail lookups use at most four concurrent requests.
 - `--candidate-limit`: final rows; default 10.
 - `--max-schools`: school cap for tier queries; default 5.
-- `--schools`: comma-separated explicit override for a tier.
-- `--verify-roles N`: call paid `person_detail` for up to N shortlisted candidates per school; default 0.
+- `--schools`: comma-separated explicit schools for tier recommendations or a same-query discover comparison; capped by `--max-schools`.
+- `--verify-roles N`: call paid `person_detail` for up to N shortlisted candidates **per school**; default 0. On a multi-school result, prefer checking only final person IDs directly after the bounded first pass so verification cost and latency scale with the actual shortlist.
 - `--hired-since YEAR`: screen for likely-recent hires (e.g. 新引进导师 since 2020). Implies `person_detail` verification for the shortlist. Only candidates with positive evidence (bio join year in the window, doctorate finished near it, or a junior title) enter the main list; everyone else is reported under `hire_screening.no_hire_evidence` because AMiner has no hire-date field and established scholars hired recently are undetectable. Never present a `no_hire_evidence` scholar as a confirmed new hire — direct the user to official department announcements.
 - `--max-cost`: reject a worst-case estimate at or above this amount; default ¥5.00.
 - `--rank-by`: ranking dimension — `overall` (default), `citation` (established high-citation PIs), `recent` (most recent direction activity), `rising` (heuristic rising stars: recent direction evidence with a smaller citation base).
@@ -156,6 +185,9 @@ Return:
 3. Two to four evidence-backed reasons per candidate.
 4. Risks and items requiring verification, especially current affiliation, current recruitment status, degree eligibility, and admissions deadlines.
 5. A cost summary listing APIs called, calls per API, unit price, total price, and unavailable evidence.
+
+If a returned person's `role_unverified` is true, call them a **researcher lead (学者线索)**, not a confirmed advisor; do not count them as a verified supervisor or advise immediate outreach. A paper affiliation establishes where that paper was signed, not current employment or graduate-supervisor eligibility. If no verified advisor remains, say so plainly and point to the official faculty/admissions roster for the missing check.
+Do not add "skipped paper-author entries" warnings across passes and call the sum distinct scholars; the same author or paper may be inspected twice.
 
 Use these labels consistently:
 

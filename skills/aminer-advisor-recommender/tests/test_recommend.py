@@ -11,6 +11,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from aminer_client import AMinerAPIError, AMinerClient, CostLedger  # noqa: E402
 from recommend import (  # noqa: E402
+    deepdive_person,
+    paper_topic_relevant,
+    focus_topic_relevant,
     Candidate,
     ResolvedOrganization,
     applicant_readiness,
@@ -26,6 +29,10 @@ from recommend import (  # noqa: E402
     enrich_collaboration,
     enrich_from_portrait,
     estimate_cost,
+    estimate_person_cost,
+    bounded_paper_ids,
+    linked_recent_papers,
+    main,
     extract_institution_name,
     filter_by_interest_mismatch,
     filter_discipline_conflicts,
@@ -34,6 +41,8 @@ from recommend import (  # noqa: E402
     is_mainland_china_institution,
     mark_duplicate_names,
     recommend_for_school,
+    resolve_organization,
+    paper_search,
     resolve_people,
     score_candidates,
     select_profile_portfolio,
@@ -68,6 +77,42 @@ def tiers():
 
 
 class RecommendationLogicTests(unittest.TestCase):
+    def test_compound_org_resolves_parent_and_uses_school_id(self):
+        client = ScriptedClient({
+            "org_disambiguate_pro": [{"一级": "浙江大学", "一级ID": "school-zju",
+                                      "二级": "计算机科学与技术学院", "二级ID": "department-cs"}],
+            "org_search": [{"org_name": "Zhejiang University", "org_id": "school-zju", "aliases": []}],
+            "paper_qa_search": [{"id": "z1", "title": "Robot Learning", "year": 2025}],
+        })
+        org = resolve_organization(client, "浙江大学计算机科学与技术学院")
+        self.assertEqual(org.org_id, "school-zju")
+        self.assertEqual(client.calls[1][1]["orgs"], ["浙江大学"])
+        self.assertEqual(paper_search(client, "robot learning", org, 10)[0]["id"], "z1")
+        params = client.calls[2][1]
+        self.assertEqual(params["org_id"], ["school-zju"])
+        self.assertEqual(params["query"], "robot learning")
+        self.assertNotIn("topic_high", params)
+        self.assertNotIn("org_terms", params)
+
+    def test_compound_org_without_parent_never_uses_department_id(self):
+        client = ScriptedClient({
+            "org_disambiguate_pro": [],
+            "org_search": [{"org_name": "浙江大学计算机学院", "org_id": "department-cs", "aliases": []}],
+        })
+        self.assertIsNone(resolve_organization(client, "浙江大学计算机学院"))
+        self.assertEqual(client.calls[-1][1]["orgs"], ["浙江大学"])
+
+    def test_qa_empty_uses_title_query_name_fallback(self):
+        client = ScriptedClient({
+            "paper_qa_search": [],
+            "paper_search_pro": [{"id": "f1", "title": "Computer Vision", "year": 2025}],
+        })
+        org = ResolvedOrganization("清华大学", "school-thu", "Tsinghua University")
+        self.assertEqual(paper_search(client, "computer vision", org, 10)[0]["id"], "f1")
+        self.assertEqual([api for api, _ in client.calls], ["paper_qa_search", "paper_search_pro"])
+        self.assertEqual(client.calls[-1][1]["query"], "computer vision")
+        self.assertEqual(client.calls[-1][1]["org"], "Tsinghua University")
+
     def test_cost_ledger(self):
         ledger = CostLedger()
         ledger.add("paper_search_pro")
@@ -415,6 +460,11 @@ class RecommendationLogicTests(unittest.TestCase):
         estimate = estimate_cost("tier", school_count=100, alias_count=3, paper_limit=10, verify_roles=0)
         self.assertGreater(estimate["worst_case_cny"], 5.0)
 
+    def test_professor_title_does_not_verify_supervisor_eligibility(self):
+        candidate = Candidate(person_id="p1", name="Prof X", role="Professor", role_unverified=False)
+        self.assertIn("graduate-supervisor eligibility for the requested degree",
+                      candidate.to_dict()["needs_verification"])
+
     def test_cost_estimate_counts_per_school_role_and_collaboration_calls(self):
         estimate = estimate_cost("collaboration", school_count=3, alias_count=1, paper_limit=2, verify_roles=2)
         self.assertEqual(estimate["person_detail_calls"], 6)
@@ -444,6 +494,36 @@ class RecommendationLogicTests(unittest.TestCase):
         rows = discover_institutions(DiscoverClient(), "robot learning", [], 5, [])
         self.assertEqual([row["organization_id"] for row in rows], ["o1", "o2"])
         self.assertEqual(rows[0]["matched_paper_count"], 1)
+
+    def test_discover_explicit_schools_uses_same_org_scoped_query_and_affiliation_check(self):
+        client = ScriptedClient({
+            "org_search": lambda p: [{"org_id": "a" if p["orgs"][0] == "Alpha University" else "b",
+                                      "org_name": p["orgs"][0], "aliases": []}],
+            "paper_qa_search": lambda p: [{"id": p["org_id"][0] + "1", "title": "Robot Learning", "year": 2025}],
+            "paper_info": lambda p: [{"id": p["ids"][0], "title": "Robot Learning", "year": 2025}],
+            "paper_detail": lambda p: [{"id": p["id"], "title": "Robot Learning", "year": 2025,
+                                         "authors": [{"name": "X", "org": "Alpha University", "orgid": "a"}]}],
+        })
+        rows = discover_institutions(client, "robot learning", [], 5, [],
+                                     ["Alpha University", "Beta University"])
+        self.assertEqual([(r["organization_id"], r["matched_paper_count"]) for r in rows],
+                         [("a", 1), ("b", 0)])
+        qa = [params for api, params in client.calls if api == "paper_qa_search"]
+        self.assertEqual([p["org_id"] for p in qa], [["a"], ["b"]])
+        self.assertTrue(all(p["query"] == "robot learning" for p in qa))
+        self.assertTrue(all(r["coverage"] == "bounded_org_id_sample" for r in rows))
+
+    def test_round_robin_paper_cap_preserves_alias_coverage(self):
+        rows = [[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}],
+                [{"id": "a1"}, {"id": "b2"}]]
+        self.assertEqual(bounded_paper_ids(rows, 3), ["a1", "a2", "b2"])
+
+    def test_person_cost_includes_id_relation_and_main_preflights_multi_person(self):
+        self.assertEqual(estimate_person_cost(3, 6, True, 1)["person_paper_relation_calls"], 3)
+        with patch.object(sys, "argv", ["recommend.py", "--mode", "person", "--names", "A,B,C",
+                                        "--direction", "robotics", "--deep"]):
+            with self.assertRaisesRegex(SystemExit, "Worst-case API cost estimate"):
+                main()
 
     def test_unknown_organization_returns_actionable_warning(self):
         class MissingOrgClient:
@@ -475,6 +555,7 @@ class RecommendationLogicTests(unittest.TestCase):
 
         client = ScriptedClient({
             "org_search": [{"org_id": "school1", "org_name": "Nankai University", "aliases": []}],
+            "paper_qa_search": [],
             "paper_search_pro": paper_search_pro,
             "paper_info": [{"id": "p1", "title": detail["title"], "year": 2025}],
             "paper_detail": [detail],
@@ -489,6 +570,7 @@ class RecommendationLogicTests(unittest.TestCase):
         self.assertTrue(any("global direction fallback added" in w for w in warnings))
         # a global (org-unfiltered) paper_search_pro call must have happened
         self.assertTrue(any(api == "paper_search_pro" and not p.get("org") for api, p in client.calls))
+        self.assertEqual(len([api for api, _ in client.calls if api == "paper_detail"]), 1)
 
 
 
@@ -634,6 +716,168 @@ class PortraitEnrichTests(unittest.TestCase):
         enrich_from_portrait(client, cand, hired_since=2020)
         self.assertEqual(cand.hire_assessment["status"], "no_hire_evidence")  # safe fallback
         self.assertEqual(len(cand.career), 1)  # career still recorded
+
+
+class PersonDeepDiveTests(unittest.TestCase):
+    def test_person_id_relation_recovers_recent_old_affiliation_work(self):
+        client = ScriptedClient({
+            "person_search": [{"id": "sjtu-liu", "name": "Fucheng Liu", "name_zh": "刘付成",
+                               "org": "Shanghai Jiao Tong University", "org_zh": "上海交通大学", "org_id": "sjtu"}],
+            "paper_search_pro": [],
+            "person_paper_relation": [
+                {"id": "p-new", "author_id": "sjtu-liu", "title": "Satellite Attitude Control"},
+                {"id": "p-old", "author_id": "sjtu-liu", "title": "Satellite Attitude Control"},
+                {"id": "p-future", "author_id": "sjtu-liu", "title": "Satellite Attitude Control"},
+                {"id": "p-other", "author_id": "other-person", "title": "Satellite Attitude Control"},
+            ],
+            "paper_info": lambda p: [
+                {"id": "p-new", "title": "Satellite Attitude Control with Reaction Wheels", "year": 2025,
+                 "authors": [{"name": "Fucheng Liu", "org": "Old University"}]},
+                {"id": "p-old", "title": "Satellite Attitude Control", "year": 2015},
+                {"id": "p-future", "title": "Satellite Attitude Control", "year": 2027},
+            ],
+        })
+        warnings = []
+        profile = deepdive_person(client, "刘付成", "上海交通大学", False, 5, warnings,
+                                  ["satellite attitude control"])
+        self.assertEqual([p["aminer_url"].split("/")[-1] for p in profile["recent_papers"]], ["p-new"])
+        self.assertEqual(profile["recent_papers"][0]["source"], "person_paper_relation")
+        self.assertTrue(any("具体作者单位仍需原文确认" in w for w in warnings))
+        relation = [p for api, p in client.calls if api == "person_paper_relation"]
+        self.assertEqual(relation, [{"id": "sjtu-liu"}])
+
+    def test_id_relation_labels_off_topic_paper_instead_of_claiming_focus(self):
+        client = ScriptedClient({
+            "person_paper_relation": [{"id": "p1", "author_id": "person1"}],
+            "paper_info": [{"id": "p1", "title": "Photonic Crystal", "year": 2025}],
+        })
+        papers = linked_recent_papers(client, "person1", ["satellite attitude control"], 5, [])
+        self.assertEqual(len(papers), 1)
+        self.assertFalse(papers[0]["topic_match"])
+
+    def test_focused_code_reasoning_does_not_count_generic_llm_papers(self):
+        terms = ["LLM code reasoning", "large language model", "LLM", "code reasoning"]
+        self.assertTrue(focus_topic_relevant(
+            "MARCO: Meta-Reflection with Cross-Referencing for Code Reasoning", terms))
+        self.assertFalse(focus_topic_relevant(
+            "Sample Lottery: Unsupervised Discovery of Critical Instances for LLM Reasoning", terms))
+        self.assertTrue(focus_topic_relevant(
+            "GEO Satellite Attitude Control", ["spacecraft attitude control", "attitude control"]))
+
+    def test_paper_topic_relevance_flags_low_overlap(self):
+        interests = ["Attitude Control", "Geo Satellite", "Reaction Wheel"]
+        self.assertTrue(paper_topic_relevant("Active Vibration Control of On-Orbit Assembly", interests))
+        # plasma photonic crystal paper shares no interest token -> low overlap
+        self.assertFalse(paper_topic_relevant("Tunable Valley Topological States Via Plasma Photonic Crystals", interests))
+        # no interests -> cannot filter, treat as match
+        self.assertTrue(paper_topic_relevant("anything at all", []))
+
+    def test_deepdive_disambiguates_and_flags_mixin(self):
+        class DDClient:
+            def call(self, api, params):
+                if api == "person_search":
+                    return {"success": True, "data": [
+                        {"id": "a1", "name": "Fucheng Liu", "name_zh": "刘付成",
+                         "org": "Peking University", "org_zh": "北京大学", "n_citation": 5000, "interests": ["X"]},
+                        {"id": "a2", "name": "Fucheng Liu", "name_zh": "刘付成",
+                         "org": "Shanghai Jiao Tong University", "org_zh": "上海交通大学航空航天学院",
+                         "n_citation": 212, "interests": ["Attitude Control"]},
+                    ]}
+                if api == "paper_search_pro":
+                    return {"success": True, "data": [
+                        {"id": "p1", "title": "Attitude Control of Satellite", "year": 2026},
+                        {"id": "p2", "title": "Plasma Photonic Crystal", "year": 2026},
+                        {"id": "p3", "title": "Valley Topological States", "year": 2026},
+                    ]}
+                raise AssertionError(api)
+
+        # school given, exactly one org matches -> confident deep-dive of a2 (not the higher-cited a1)
+        warnings = []
+        prof = deepdive_person(DDClient(), "刘付成", "上海交通大学", deep=False, paper_limit=6, warnings=warnings)
+        self.assertTrue(prof["found"])
+        self.assertFalse(prof.get("needs_disambiguation"))
+        self.assertEqual(prof["person_id"], "a2")            # school match wins over higher citation
+        # 2/3 papers off-topic (majority) -> by-name list deemed unreliable, keep only on-topic
+        self.assertFalse(prof.get("recent_papers_reliable"))
+        titles = [p["title"] for p in prof["recent_papers"]]
+        self.assertEqual(titles, ["Attitude Control of Satellite"])
+        self.assertTrue(any("污染" in w for w in warnings))
+
+    def test_deepdive_common_name_asks_for_disambiguation(self):
+        """A bare common name resolving to many distinct people must NOT be guessed."""
+        class CommonNameClient:
+            def call(self, api, params):
+                assert api == "person_search"          # must not reach paper_search_pro
+                return {"success": True, "data": [
+                    {"id": "z1", "name": "Tao Zhang", "name_zh": "张涛", "org": "Catalysis Inst", "n_citation": 9000, "interests": ["Catalysis"]},
+                    {"id": "z2", "name": "Tao Zhang", "name_zh": "张涛", "org": "Materials Sci", "n_citation": 8000, "interests": ["Metallic Glass"]},
+                    {"id": "z3", "name": "Tao Zhang", "name_zh": "张涛", "org": "Automation", "n_citation": 7000, "interests": ["Reinforcement Learning"]},
+                ]}
+        warnings = []
+        prof = deepdive_person(CommonNameClient(), "张涛", "", deep=False, paper_limit=6, warnings=warnings)
+        self.assertTrue(prof["needs_disambiguation"])
+        self.assertGreaterEqual(len(prof["candidates"]), 3)
+        self.assertNotIn("recent_papers", prof)             # did not deep-dive a guess
+        self.assertTrue(any("无法确定" in w for w in warnings))
+
+    def test_deepdive_dominant_citation_is_confident(self):
+        """No school, but top citation dominates -> confident pick, no disambiguation."""
+        class DomClient:
+            def call(self, api, params):
+                if api == "person_search":
+                    return {"success": True, "data": [
+                        {"id": "d1", "name": "Linjiang Zheng", "name_zh": "郑林江", "org": "Chongqing Univ", "n_citation": 971, "interests": ["Data Models"]},
+                        {"id": "d2", "name": "Linjiang Zheng", "name_zh": "郑林江", "org": "Somewhere", "n_citation": 30, "interests": ["Other"]},
+                    ]}
+                return {"success": True, "data": [{"id": "q1", "title": "Data Models for Flight Safety", "year": 2026}]}
+        prof = deepdive_person(DomClient(), "郑林江", "", deep=False, paper_limit=6, warnings=[])
+        self.assertFalse(prof.get("needs_disambiguation"))
+        self.assertEqual(prof["person_id"], "d1")
+
+    def test_deepdive_not_found(self):
+        class EmptyClient:
+            def call(self, api, params):
+                return {"success": True, "data": []}
+        prof = deepdive_person(EmptyClient(), "查无此人", "", deep=False, paper_limit=6, warnings=[])
+        self.assertFalse(prof["found"])
+
+    def test_named_focus_finds_marco_and_excludes_other_school_namesake(self):
+        marco = "6833cebb163c01c85061f69d"
+        client = ScriptedClient({
+            "person_search": [{"id": "pku-ming", "name": "Ming Zhang", "name_zh": "张铭",
+                               "org": "Institute of Data Science, School of CS, Peking University",
+                               "org_zh": "北京大学计算机学院",
+                               "org_id": "pku", "interests": ["Code Reasoning"]}],
+            "paper_search_pro": [
+                {"id": marco, "title": "MARCO: Meta-Reflection with Cross-Referencing for Code Reasoning", "year": 2025},
+                {"id": "fudan-paper", "title": "Code Reasoning at Fudan", "year": 2025},
+            ],
+            "paper_detail": lambda p: [{"id": p["id"], "authors": [
+                {"name": "Zhang, Ming", "org": "Peking University", "orgid": "pku"}
+                if p["id"] == marco else
+                {"name": "Ming Zhang", "org": "Fudan University", "orgid": "fudan"}
+            ]}],
+        })
+        warnings = []
+        profile = deepdive_person(client, "张铭", "北京大学", False, 10, warnings, ["code"])
+        self.assertEqual([p["aminer_url"].split("/")[-1] for p in profile["recent_papers"]], [marco])
+        self.assertTrue(profile["recent_papers"][0]["topic_match"])
+        searches = [p for api, p in client.calls if api == "paper_search_pro"]
+        self.assertEqual(len(searches), 1)
+        self.assertEqual(searches[0]["query"], "code")
+        self.assertEqual(searches[0]["org"], "Peking University")
+        self.assertNotIn("keyword", searches[0])
+        self.assertEqual(len([api for api, _ in client.calls if api == "paper_detail"]), 2)
+        self.assertTrue(any("未核实到该校同名作者" in w for w in warnings))
+
+    def test_school_constraint_does_not_pick_other_school_by_citations(self):
+        client = ScriptedClient({"person_search": [
+            {"id": "fudan", "name": "Ming Zhang", "org": "Fudan University", "n_citation": 9000},
+            {"id": "nju", "name": "Ming Zhang", "org": "Nanjing University", "n_citation": 10},
+        ]})
+        profile = deepdive_person(client, "张铭", "北京大学", False, 10, [])
+        self.assertTrue(profile["needs_disambiguation"])
+        self.assertFalse(any(api == "paper_search_pro" for api, _ in client.calls))
 
 
 if __name__ == "__main__":

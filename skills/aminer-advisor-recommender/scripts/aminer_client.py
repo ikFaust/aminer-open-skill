@@ -23,6 +23,7 @@ API_SPEC: dict[str, tuple[str, str, float]] = {
     "person_search": ("POST", "/api/person/search", 0.0),
     "paper_info": ("POST", "/api/paper/info", 0.0),
     "org_search": ("POST", "/api/organization/search", 0.0),
+    "org_disambiguate_pro": ("POST", "/api/organization/na/pro", 0.05),
     "paper_search_pro": ("GET", "/api/paper/search/pro", 0.01),
     "paper_qa_search": ("POST", "/api/paper/qa/search", 0.05),
     "paper_detail": ("GET", "/api/paper/detail", 0.01),
