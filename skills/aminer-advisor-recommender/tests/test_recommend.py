@@ -632,23 +632,22 @@ class InterestMatchTests(unittest.TestCase):
 
 
 class BackfillChineseNamesTests(unittest.TestCase):
-    def test_same_org_chinese_name_filled(self):
+    def test_same_person_id_chinese_name_filled(self):
         cand = Candidate(person_id="p1", name="Wei Ye", name_zh="", org_id="org-1")
         client = ScriptedClient({"person_search": [
-            {"name": "Wei Ye", "name_zh": "叶蔚", "org_id": "org-1"},
-            {"name": "Wei Ye", "name_zh": "韦烨", "org_id": "org-9"},
+            {"id": "p1", "name": "Wei Ye", "name_zh": "叶蔚", "org_id": "org-1"},
+            {"id": "p2", "name": "Wei Ye", "name_zh": "韦烨", "org_id": "org-9"},
         ]})
         backfill_chinese_names(client, [cand], [])
         self.assertEqual(cand.name_zh, "叶蔚")
 
-    def test_homonym_flagged_when_only_other_org(self):
+    def test_same_school_homonym_does_not_supply_chinese_name(self):
         cand = Candidate(person_id="p1", name="Bowen Cao", name_zh="", org_id="org-1")
         client = ScriptedClient({"person_search": [
-            {"name": "Bowen Cao", "name_zh": "曹博文", "org_id": "org-other"},
+            {"id": "p2", "name": "Bowen Cao", "name_zh": "曹博文", "org_id": "org-1"},
         ]})
         backfill_chinese_names(client, [cand], [])
-        self.assertIn("曹博文", cand.name_zh)
-        self.assertIn("待核实", cand.name_zh)
+        self.assertEqual(cand.name_zh, "")
 
     def test_unresolved_and_already_named_are_skipped(self):
         unresolved = Candidate(person_id="unresolved:x", name="Di He", name_zh="", org_id="org-1")
