@@ -12,7 +12,7 @@ import sys
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -166,7 +166,8 @@ class Candidate:
             "n_citation": self.n_citation,
             "evidence_papers": list(self.papers.values()),
             "collaboration_organizations": [
-                {"id": key, "name": value, "type": self.collaboration_types.get(key, "unknown")}
+                {"id": key, "name": value, "type": self.collaboration_types.get(key, "unknown"),
+                 "is_university": is_university_affiliation(value)}
                 for key, value in self.collaboration_orgs.items()
             ],
             "scores": self.scores,
@@ -278,13 +279,14 @@ def batch_paper_info(client: AMinerClient, paper_ids: list[str], warnings: list[
 def clean_paper(row: dict[str, Any], detail: dict[str, Any] | None, terms: list[str]) -> dict[str, Any] | None:
     title = str((detail or {}).get("title") or row.get("title") or "").strip()
     year = (detail or {}).get("year") or row.get("year")
-    if not title or not isinstance(year, int):
+    if not title or not isinstance(year, int) or year > CURRENT_YEAR:
         return None
-    text = " ".join(
-        [title, str(row.get("abstract_slice") or ""), str((detail or {}).get("abstract") or "")]
-        + [str(x) for x in ((detail or {}).get("keywords") or [])]
-    )
-    matched = [term for term in terms if contains_any(text, [term])]
+    keywords = " ".join(str(x) for x in ((detail or {}).get("keywords") or []))
+    abstract = " ".join([str(row.get("abstract_slice") or ""), str((detail or {}).get("abstract") or "")])
+    title_terms = [term for term in terms if contains_any(title, [term])]
+    keyword_terms = [term for term in terms if contains_any(keywords, [term])]
+    abstract_terms = [term for term in terms if contains_any(abstract, [term])]
+    matched = list(dict.fromkeys([*title_terms, *keyword_terms, *abstract_terms]))
     if not matched:
         return None
     paper_id = str(row.get("id") or (detail or {}).get("id") or "")
@@ -295,7 +297,28 @@ def clean_paper(row: dict[str, Any], detail: dict[str, Any] | None, terms: list[
         "aminer_url": f"https://www.aminer.cn/pub/{paper_id}",
         "direction_term_match": True,
         "matched_terms": matched,
+        "topic_evidence": "title" if title_terms else "keywords" if keyword_terms else "abstract_only",
+        "n_citation_bucket": row.get("n_citation_bucket") or (detail or {}).get("n_citation_bucket"),
     }
+
+
+def multimodal_llm_paper(row: dict[str, Any], detail: dict[str, Any] | None) -> bool:
+    """Require model evidence, not a generic 'multimodal' keyword hit."""
+    title = normalized_text((detail or {}).get("title") or row.get("title"))
+    keywords = normalized_text(" ".join(str(x) for x in ((detail or {}).get("keywords") or [])))
+    direct = (
+        "multimodal large language model", "multi-modal large language model",
+        "multimodal llm", "multi-modal llm", "mllm", "vision-language model",
+        "visual language model", "large vision-language model", "vlm",
+    )
+    if contains_any(title + " " + keywords, direct):
+        return True
+    modality_in_title = contains_any(title, (
+        "multimodal", "multi-modal", "vision-language", "visual-linguistic",
+        "image-text", "video-language", "audio-language",
+    ))
+    model_in_title = contains_any(title, ("language model", "foundation model", "llm"))
+    return modality_in_title and model_in_title
 
 
 def fetch_paper_details(
@@ -509,6 +532,14 @@ def classify_org(name: str) -> str:
     if any(classification_match(term) for term in academic_terms):
         return "academic"
     return "unknown"
+
+
+def is_university_affiliation(name: str) -> bool:
+    """Conservative distinction between a university and another academic institute."""
+    value = normalized_text(name)
+    return "大学" in value or bool(re.search(
+        r"\b(universit\w*|college|institute of technology|polytechnic)\b", value
+    ))
 
 
 def enrich_collaboration(
@@ -992,23 +1023,28 @@ def build_rank_key(mode: str, collaboration_type: str, rank_by: str):
 
 def estimate_cost(
     mode: str, school_count: int, alias_count: int, paper_limit: int, verify_roles: int,
-    profile_discovery: bool = False,
+    profile_discovery: bool = False, discovery_alias_count: int = 0,
 ) -> dict[str, Any]:
     search_calls = alias_count * max(1, school_count) if mode != "discover" or school_count else alias_count
     # Each school can make an ID-scoped QA pass, a name fallback, and one
     # bounded global pass. The estimate must include these possible calls.
     global_search_calls = search_calls if mode != "discover" else 0
-    qa_search_calls = search_calls if mode != "discover" or school_count else 0
+    qa_search_calls = (2 * search_calls if mode == "discover" and school_count else search_calls)
+    if mode == "discover" and not school_count:
+        qa_search_calls = 0
+    if mode in {"profile", "collaboration"} and school_count:
+        qa_search_calls += school_count * (min(2, alias_count - 1) if alias_count > 1 else 1)
     pro_search_calls = (2 * search_calls if mode != "discover" or school_count else search_calls) + global_search_calls
-    details_per_school = min(15, max(8, 2 * paper_limit))
-    detail_calls = ((school_count * (min(8, paper_limit) if mode == "discover" else 2 * details_per_school))
+    details_per_school = (min(24, max(12, 3 * paper_limit)) if mode == "collaboration"
+                          else min(15, max(8, 2 * paper_limit)))
+    detail_calls = ((school_count * (min(16, max(8, 2 * paper_limit)) if mode == "discover" else 2 * details_per_school))
                     if school_count else alias_count * paper_limit)
     org_search_calls = school_count
     # Collaboration enrichment and role verification run independently for each school.
     # Discover currently aggregates author affiliations directly and does not call org_detail.
     org_detail_calls = school_count if mode == "collaboration" else 0
     person_detail_calls = verify_roles * school_count if mode != "discover" else 0
-    discovery_search_calls = alias_count if profile_discovery else 0
+    discovery_search_calls = (discovery_alias_count or alias_count) if profile_discovery else 0
     discovery_detail_calls = discovery_search_calls * paper_limit
     estimate = (
         (pro_search_calls + discovery_search_calls) * API_SPEC["paper_search_pro"][2]
@@ -1244,7 +1280,7 @@ def recommend_for_school(
     profile: dict[str, Any] | None, max_author_lookups: int, allow_name_fallback: bool,
     verify_roles: int, warnings: list[str], organization_cache: dict[str, ResolvedOrganization | None],
     include_collaboration: bool, allow_cross_discipline: bool, hired_since: int = 0, roster_pages: int = 0,
-    with_portrait: bool = False, candidate_limit: int = 10,
+    with_portrait: bool = False, candidate_limit: int = 10, citation_seed: bool = False,
 ) -> dict[str, Candidate]:
     organization = organization_cache.get(school)
     if school not in organization_cache:
@@ -1262,6 +1298,21 @@ def recommend_for_school(
         for row in term_rows:
             if row.get("id"):
                 search_rows[str(row["id"])] = row
+    if citation_seed:
+        # Mix recent citation-ranked papers with the newest-year slice so
+        # established faculty can enter the bounded identity checks.
+        seed_terms = terms[1:3] if len(terms) > 1 else terms
+        for term in seed_terms:
+            cited_rows = unwrap(client.call("paper_qa_search", {
+                "use_topic": True, "query": term, "org_id": [organization.org_id],
+                "size": paper_limit, "offset": 0, "force_citation_sort": True,
+            }))
+            cited_rows = [row for row in cited_rows if isinstance(row.get("year"), int)
+                          and CURRENT_YEAR - 5 <= row["year"] <= CURRENT_YEAR]
+            rows_by_term.append(cited_rows)
+            for row in cited_rows:
+                if row.get("id"):
+                    search_rows.setdefault(str(row["id"]), row)
     if not search_rows and normalized_text(organization.canonical_name) != normalized_text(school):
         warnings.append(f"no papers found with canonical name {organization.canonical_name}; retried original name {school}")
         for term in terms:
@@ -1270,7 +1321,8 @@ def recommend_for_school(
             for row in term_rows:
                 if row.get("id"):
                     search_rows[str(row["id"])] = row
-    detail_cap = min(15, max(8, 2 * paper_limit))
+    detail_cap = (min(24, max(12, 3 * paper_limit)) if include_collaboration
+                  else min(15, max(8, 2 * paper_limit)))
     selected_ids = bounded_paper_ids(rows_by_term, detail_cap)
     if len(search_rows) > len(selected_ids):
         warnings.append(f"{school}: inspected {len(selected_ids)} of {len(search_rows)} matched papers across direction terms")
@@ -1308,6 +1360,7 @@ def recommend_for_school(
                 client, g_papers, g_details, organization, terms, max_author_lookups,
                 allow_name_fallback, warnings,
             )
+            details = g_details
             added = 0
             for key, cand in g_candidates.items():
                 if key not in candidates:
@@ -1343,10 +1396,19 @@ def discover_institutions(
     client: AMinerClient, direction: str, aliases: list[str], paper_limit: int, warnings: list[str],
     schools: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    terms = direction_aliases(direction, aliases)[:3]
+    terms = direction_aliases(direction, aliases)[:6]
     if schools:
         compared: list[dict[str, Any]] = []
-        detail_cap = min(8, paper_limit)
+        detail_cap = min(16, max(8, 2 * paper_limit))
+        representative_limit, recent_example_limit = (2, 1) if len(schools) >= 9 else (3, 2)
+        multimodal_llm_focus = any(contains_any(term, ("multimodal large language model", "多模态大模型"))
+                                   for term in terms)
+        # A paper's title and keyword list can express the two halves of this
+        # compound topic separately (CogVLM: VLM in title; Multimodal Learning
+        # and Large Language Model as separate keywords). These extra terms
+        # affect local evidence matching, not the paid search-query budget.
+        evidence_terms = [*terms, "multimodal", "vlm", "visual-linguistic", "vision-language"] \
+            if multimodal_llm_focus else terms
         for school in schools:
             organization = resolve_organization(client, school)
             if organization is None:
@@ -1355,35 +1417,108 @@ def discover_institutions(
                                  "matched_paper_count": 0, "inspected_paper_count": 0,
                                  "evidence_papers": [], "coverage": "unresolved_organization"})
                 continue
-            rows_by_term = [paper_search(client, term, organization, paper_limit) for term in terms]
-            search_rows = {str(row["id"]): row for rows in rows_by_term for row in rows if row.get("id")}
+            rows_by_term: list[list[dict[str, Any]]] = []
+            search_rows: dict[str, dict[str, Any]] = {}
+            def retrieve_both_orders(term: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+                recent = paper_search(client, term, organization, paper_limit)
+                influential = unwrap(client.call("paper_qa_search", {
+                    "use_topic": True, "query": term, "org_id": [organization.org_id],
+                    "size": paper_limit, "offset": 0, "force_citation_sort": True,
+                }))
+                if multimodal_llm_focus:
+                    # QA citation sorting can still return pure language-model
+                    # hits ahead of the direct multimodal work. Preserve its
+                    # citation order within each relevance group.
+                    influential = sorted(influential, key=lambda row: multimodal_llm_paper(row, None), reverse=True)
+                return recent, influential
+            # These independent searches are the latency bottleneck in a
+            # multi-school comparison; keep their original term order while
+            # using a small bounded pool for network waits.
+            with ThreadPoolExecutor(max_workers=min(4, len(terms))) as executor:
+                paired_samples = list(executor.map(retrieve_both_orders, terms))
+            for recent, influential in paired_samples:
+                for sample in (recent, influential):
+                    current = [row for row in sample if isinstance(row.get("year"), int)
+                               and CURRENT_YEAR - 5 <= row["year"] <= CURRENT_YEAR]
+                    rows_by_term.append(current)
+                    for row in current:
+                        paper_id = str(row.get("id") or "")
+                        if not paper_id:
+                            continue
+                        stored = search_rows.setdefault(paper_id, dict(row))
+                        if row.get("n_citation_bucket"):
+                            stored["n_citation_bucket"] = row["n_citation_bucket"]
             selected_ids = bounded_paper_ids(rows_by_term, detail_cap)
             info_by_id = {str(row.get("id")): row for row in batch_paper_info(client, selected_ids, warnings)
                           if row.get("id")}
             details = fetch_paper_details(client, selected_ids, detail_cap, warnings)
             evidence: list[dict[str, Any]] = []
+            weak_topic: list[dict[str, Any]] = []
+            adjacent_topic: list[dict[str, Any]] = []
+            affiliation_conflicts = 0
             school_names = [organization.canonical_name, organization.query, *organization.aliases]
             for paper_id in selected_ids:
                 detail = details.get(paper_id)
                 merged = dict(search_rows[paper_id], **info_by_id.get(paper_id, {}))
-                cleaned = clean_paper(merged, detail, terms)
+                cleaned = clean_paper(merged, detail, evidence_terms)
                 if not cleaned or not (CURRENT_YEAR - 5 <= cleaned["year"] <= CURRENT_YEAR):
                     continue
                 authors = (detail or {}).get("authors") or []
-                if not any(isinstance(author, dict) and (
-                    str(author.get("orgid") or "") == organization.org_id
-                    or contains_any(str(author.get("org") or ""), school_names)
-                ) for author in authors):
+                affiliation_conflicts += sum(
+                    1 for author in authors if isinstance(author, dict)
+                    and str(author.get("orgid") or "") == organization.org_id
+                    and str(author.get("org") or "").strip()
+                    and not contains_any(str(author["org"]), school_names)
+                )
+                # AMiner sometimes assigns the same orgid to authors whose
+                # explicit affiliations name several different institutions.
+                # Count only an author whose affiliation text names this school.
+                if not any(isinstance(author, dict) and
+                           contains_any(str(author.get("org") or ""), school_names)
+                           for author in authors):
                     continue
-                evidence.append(cleaned)
+                if cleaned["topic_evidence"] == "abstract_only":
+                    weak_topic.append(cleaned)
+                elif multimodal_llm_focus and not multimodal_llm_paper(merged, detail):
+                    adjacent_topic.append(cleaned)
+                else:
+                    evidence.append(cleaned)
+            distinct: dict[str, dict[str, Any]] = {}
+            def citation_floor(paper: dict[str, Any]) -> int:
+                match = re.search(r"\d+", str(paper.get("n_citation_bucket") or ""))
+                return int(match.group()) if match else 0
+            for paper in evidence:
+                key = normalized_text(paper["title"]).rstrip(". ")
+                if key not in distinct or citation_floor(paper) > citation_floor(distinct[key]):
+                    distinct[key] = paper
+            unique_evidence = list(distinct.values())
+            representative = sorted(
+                unique_evidence, key=lambda paper: (citation_floor(paper), paper["year"]), reverse=True
+            )[:representative_limit]
+            representative_ids = {paper["id"] for paper in representative}
+            recent_examples = [paper for paper in sorted(unique_evidence, key=lambda paper: paper["year"], reverse=True)
+                               if paper["id"] not in representative_ids][:recent_example_limit]
+            recent_count = sum(paper["year"] >= CURRENT_YEAR - 2 for paper in unique_evidence)
+            influential_count = sum(citation_floor(paper) >= 201 for paper in unique_evidence)
+            flagship_count = sum(citation_floor(paper) >= 1001 for paper in unique_evidence)
             compared.append({"organization": organization.canonical_name,
                              "organization_id": organization.org_id,
-                             "matched_paper_count": len(evidence),
+                             "matched_paper_count": len(unique_evidence),
+                             "recent_direction_paper_count": recent_count,
+                             "influential_direction_paper_count": influential_count,
+                             "flagship_paper_count": flagship_count,
                              "inspected_paper_count": len(selected_ids),
                              "search_hit_count": len(search_rows),
-                             "evidence_papers": evidence,
+                             "affiliation_conflicts": affiliation_conflicts,
+                             "abstract_only_paper_count": len(weak_topic),
+                             "adjacent_topic_paper_count": len(adjacent_topic),
+                             "representative_papers": representative,
+                             "evidence_papers": recent_examples,
+                             "evidence_papers_omitted_count": len(unique_evidence) - len(representative) - len(recent_examples),
                              "coverage": "bounded_org_id_sample"})
-        return sorted(compared, key=lambda row: row["matched_paper_count"], reverse=True)
+        # The supplied comparison set is preserved. A fixed-size sample count
+        # cannot support a national ranking, especially across different topics.
+        return compared
     search_rows: dict[str, dict[str, Any]] = {}
     for term in terms:
         for row in paper_search(client, term, None, paper_limit):
@@ -1464,7 +1599,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def write_result(result: dict[str, Any], output: Path | None) -> None:
-    rendered = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
+    # Multi-school discovery can exceed a model tool-result window even though
+    # the actual evidence is bounded. Keep saved artifacts readable and use a
+    # slightly tighter, still line-broken representation on stdout.
+    indent = 2 if output or result.get("workflow") != "discover" else 1
+    rendered = json.dumps(result, ensure_ascii=False, indent=indent) + "\n"
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(rendered, encoding="utf-8")
@@ -1952,6 +2091,37 @@ def deepdive_person(
     return profile
 
 
+def application_timing(as_of_date: date, profile: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Give bounded, cycle-specific timing for the national master's exam route."""
+    if not profile or str(profile.get("target_degree") or "").lower() not in {"master", "硕士"}:
+        return None
+    try:
+        cycle = int(profile.get("target_cycle"))
+    except (TypeError, ValueError):
+        return None
+    if not as_of_date.year <= cycle <= as_of_date.year + 3:
+        return None
+    exam_year = cycle - 1
+    camp_passed = as_of_date > date(exam_year, 8, 31)
+    registration_passed = as_of_date > date(exam_year, 10, 31)
+    exam_near = as_of_date.year == exam_year and as_of_date.month in {11, 12}
+    notes = [
+        f"{cycle} 入学的夏令营/预推免一般在 {exam_year} 年夏季；"
+        + ("截至当前日期通常已过，不可当作未来步骤。" if camp_passed else "具体安排以学校公告为准。"),
+        f"若走全国统考，报名通常在 {exam_year} 年秋季、初试通常在 {exam_year} 年 12 月；实际日期以研招网和学校公告为准。",
+    ]
+    if registration_passed:
+        notes.append("通常报名窗口已过，立即核实是否已完成报名及网上确认；不要建议未来再报名本轮考试。")
+    if exam_near:
+        notes.append("本轮初试已临近，备考余量不足两个月；不得写成还有约一年准备期。")
+    return {"target_cycle": cycle, "as_of_date": as_of_date.isoformat(),
+            "national_exam_route_only": True,
+            "summer_camp_window_passed": camp_passed,
+            "registration_window_likely_passed": registration_passed,
+            "entrance_exam_near": exam_near,
+            "notes": notes}
+
+
 def main() -> None:
     args = build_parser().parse_args()
     if args.mode == "person":
@@ -2028,8 +2198,10 @@ def main() -> None:
     # role verification even when --verify-roles was not raised explicitly.
     effective_verify_roles = max(args.verify_roles, args.candidate_limit if (args.hired_since or args.with_portrait) else 0)
     estimate = estimate_cost(
-        args.mode, estimated_school_count, min(3, 1 + len(aliases)), args.paper_limit, effective_verify_roles,
+        args.mode, estimated_school_count, min(6 if args.mode == "discover" else 3, 1 + len(aliases)),
+        args.paper_limit, effective_verify_roles,
         profile_discovery=auto_expand_profile,
+        discovery_alias_count=min(6, 1 + len(aliases)),
     )
     if estimate["worst_case_cny"] >= args.max_cost and not args.yes:
         raise SystemExit(
@@ -2051,9 +2223,12 @@ def main() -> None:
             result = {
                 "workflow": "discover", "query": {"direction": args.direction, "aliases": aliases,
                                                   "schools": schools, "window": [CURRENT_YEAR - 5, CURRENT_YEAR]},
-                "institutions": institutions[: args.candidate_limit], "warnings": warnings, "errors": errors,
+                # The caller paid to compare every explicit school. A mentor
+                # candidate limit must not silently hide the last schools.
+                "institutions": institutions if schools else institutions[: args.candidate_limit],
+                "warnings": warnings, "errors": errors,
                 "cost_estimate": estimate, "cost": client.cost.summary(),
-                "method_notes": ["Explicit schools use the same terms, year window and per-school detail cap; counts are inspected evidence, not national rankings."]
+                "method_notes": ["Explicit schools use the same terms, year window and per-school detail cap. matched_paper_count counts all verified distinct titles in the inspected sample; representative_papers and evidence_papers are compact citation-ranked and recent excerpts (at most 2+1 when comparing 9 or more schools, otherwise 3+2). Counts are not national rankings."]
                 if schools else ["Global search is a seed sample, not a national ranking; compare selected schools with --schools."],
             }
             write_result(result, args.output)
@@ -2102,7 +2277,7 @@ def main() -> None:
                     client, school, args.department, args.direction, aliases, args.paper_limit, profile,
                     args.max_author_lookups, args.allow_name_fallback, effective_verify_roles, warnings, organization_cache,
                     args.mode == "collaboration", args.allow_cross_discipline, args.hired_since, args.roster_pages,
-                    args.with_portrait, args.candidate_limit,
+                    args.with_portrait, args.candidate_limit, args.mode in {"profile", "collaboration"},
                 )
             except AMinerAPIError as exc:
                 per_school[school] = 0
@@ -2144,6 +2319,18 @@ def main() -> None:
             "Advisor role and current recruitment require official verification unless a role is explicitly returned.",
             "Reach/match/safer labels are heuristic bands, not admission probabilities.",
         ]
+        as_of_date = datetime.now(timezone.utc).date()
+        if args.mode == "profile":
+            method_notes.append(
+                f"Application advice must be relative to {as_of_date.isoformat()}: "
+                "do not present a deadline or summer camp before this date as a future step. "
+                "Check each program's official admissions schedule before giving dates."
+            )
+            if as_of_date.month >= 9 and profile and str(profile.get("target_cycle")) == str(as_of_date.year + 1):
+                method_notes.append(
+                    f"The typical June-August {as_of_date.year} summer-camp window has passed; "
+                    "describe it only as past, not as an application action still available."
+                )
         if args.rank_by == "rising":
             method_notes.append(
                 "Rising ranking is a heuristic (recent direction evidence plus a smaller citation base), "
@@ -2151,6 +2338,8 @@ def main() -> None:
             )
         result = {
             "workflow": args.mode,
+            "as_of_date": as_of_date.isoformat(),
+            "application_timing": application_timing(as_of_date, profile) if args.mode == "profile" else None,
             "query": {"direction": args.direction, "aliases": aliases, "schools": schools,
                       "department": args.department or None, "tier": tier_name or None,
                       "rank_by": args.rank_by,

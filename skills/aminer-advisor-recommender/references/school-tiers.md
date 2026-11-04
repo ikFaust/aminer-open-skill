@@ -3,6 +3,7 @@
 Load machine-readable groups from `school-tiers.json`.
 
 - Treat 华五, 985, 211, and 双一流 as user-selected filters, not timeless rankings.
+- The 211 set includes 985 universities; interpret “211” as non-985 only when the user says so.
 - Allow users to override a group with an explicit school list.
 - Keep institution identity separate from department strength and advisor fit.
 - Do not infer admissions difficulty solely from a tier label.

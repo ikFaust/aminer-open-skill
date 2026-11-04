@@ -2,6 +2,7 @@ import io
 import sys
 import unittest
 import urllib.error
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +13,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from aminer_client import AMinerAPIError, AMinerClient, CostLedger  # noqa: E402
 from recommend import (  # noqa: E402
     CURRENT_YEAR,
+    application_timing,
     deepdive_person,
     paper_topic_relevant,
     focus_topic_relevant,
@@ -40,6 +42,7 @@ from recommend import (  # noqa: E402
     institution_level,
     interest_matches_direction,
     is_mainland_china_institution,
+    is_university_affiliation,
     mark_duplicate_names,
     recommend_for_school,
     resolve_organization,
@@ -79,6 +82,19 @@ def tiers():
 
 
 class RecommendationLogicTests(unittest.TestCase):
+    def test_string_target_cycle_gives_correct_november_exam_timing(self):
+        timing = application_timing(date(2026, 11, 4),
+                                    {"target_degree": "master", "target_cycle": "2027"})
+        self.assertEqual(timing["target_cycle"], 2027)
+        self.assertTrue(timing["summer_camp_window_passed"])
+        self.assertTrue(timing["registration_window_likely_passed"])
+        self.assertTrue(timing["entrance_exam_near"])
+        self.assertIn("不足两个月", " ".join(timing["notes"]))
+
+    def test_doctoral_profile_has_no_national_master_exam_timing(self):
+        self.assertIsNone(application_timing(date(2026, 11, 4),
+                                             {"target_degree": "phd", "target_cycle": 2027}))
+
     def test_compound_org_resolves_parent_and_uses_school_id(self):
         client = ScriptedClient({
             "org_disambiguate_pro": [{"一级": "浙江大学", "一级ID": "school-zju",
@@ -189,6 +205,34 @@ class RecommendationLogicTests(unittest.TestCase):
         score_candidates({"p1": candidate}, ["vision"], "X", "", None)
         self.assertGreater(candidate.scores["direction_fit"], 0)
         self.assertIsNone(candidate.scores["academic_collaboration"])
+
+    def test_future_dated_paper_is_not_current_direction_evidence(self):
+        row = {"id": "future", "title": "Object Detection", "year": CURRENT_YEAR + 1}
+        self.assertIsNone(clean_paper(row, None, ["object detection"]))
+
+    def test_profile_citation_seed_recovers_faculty_missed_by_newest_slice(self):
+        papers = {
+            "student": {"id": "student", "title": "Object Detection in 2026", "year": CURRENT_YEAR,
+                        "authors": [{"name": "Student One", "org": "Alpha University", "orgid": "o"}]},
+            "senior": {"id": "senior", "title": "Object Detection in 2023", "year": CURRENT_YEAR - 3,
+                       "authors": [{"name": "Professor Two", "org": "Alpha University", "orgid": "o"}]},
+        }
+        client = ScriptedClient({
+            "org_search": [{"org_id": "o", "org_name": "Alpha University", "aliases": []}],
+            "paper_qa_search": lambda p: [papers["senior"] if p.get("force_citation_sort") else papers["student"]],
+            "paper_info": lambda p: [papers[i] for i in p["ids"]],
+            "paper_detail": lambda p: [papers[p["id"]]],
+            "person_search": lambda p: [{"id": "prof-2" if p["name"] == "Professor Two" else "student-1",
+                                         "name": p["name"], "org": "Alpha University", "org_id": "o",
+                                         "interests": ["Object Detection"]}],
+        })
+        result = recommend_for_school(
+            client, "Alpha University", "", "computer vision", ["object detection", "visual object detection"],
+            5, {"research_interests": ["object detection"]}, 10, False, 0, [], {}, False, False,
+            citation_seed=True,
+        )
+        self.assertIn("prof-2", result)
+        self.assertIn("senior", result["prof-2"].papers)
 
     def test_same_name_profiles_are_not_merged(self):
         first = Candidate(person_id="p1", name="Zhang Wei", source_schools={"X"})
@@ -458,6 +502,17 @@ class RecommendationLogicTests(unittest.TestCase):
         result = filter_discipline_conflicts({"m": medical}, ["computer vision"], True, [])
         self.assertEqual(set(result), {"m"})
 
+    def test_university_collaboration_is_distinct_from_research_institute(self):
+        self.assertTrue(is_university_affiliation("Hong Kong Baptist University, Department of Computer Science"))
+        self.assertTrue(is_university_affiliation("北京大学计算机学院"))
+        self.assertTrue(is_university_affiliation("Massachusetts Institute of Technology"))
+        self.assertFalse(is_university_affiliation("Shenzhen Research Institute of Big Data"))
+        candidate = Candidate(person_id="p1", name="A")
+        candidate.collaboration_orgs = {"u": "Hong Kong Baptist University", "r": "Shenzhen Research Institute of Big Data"}
+        candidate.collaboration_types = {"u": "academic", "r": "academic"}
+        rows = candidate.to_dict()["collaboration_organizations"]
+        self.assertEqual([row["is_university"] for row in rows], [True, False])
+
     def test_cost_guard_estimate(self):
         estimate = estimate_cost("tier", school_count=100, alias_count=3, paper_limit=10, verify_roles=0)
         self.assertGreater(estimate["worst_case_cny"], 5.0)
@@ -471,9 +526,33 @@ class RecommendationLogicTests(unittest.TestCase):
         estimate = estimate_cost("collaboration", school_count=3, alias_count=1, paper_limit=2, verify_roles=2)
         self.assertEqual(estimate["person_detail_calls"], 6)
         self.assertEqual(estimate["org_detail_calls"], 3)
+        self.assertEqual(estimate["paper_qa_search_calls"], 6)  # recent plus citation seed
+        self.assertEqual(estimate["paper_detail_calls"], 72)  # bounded normal and fallback samples
         discover = estimate_cost("discover", school_count=0, alias_count=2, paper_limit=3, verify_roles=9)
         self.assertEqual(discover["person_detail_calls"], 0)
         self.assertEqual(discover["org_detail_calls"], 0)
+        compared = estimate_cost("discover", school_count=2, alias_count=3, paper_limit=8, verify_roles=0)
+        self.assertEqual(compared["paper_qa_search_calls"], 12)
+
+    def test_explicit_school_comparison_does_not_hide_paid_schools_at_candidate_cap(self):
+        class EmptyLedger:
+            def summary(self):
+                return {"total_cost_cny": 0}
+
+        class EmptyClient:
+            cost = EmptyLedger()
+
+        schools = [f"School{index}" for index in range(12)]
+        rows = [{"organization": school, "matched_paper_count": 0} for school in schools]
+        argv = ["recommend.py", "--mode", "discover", "--direction", "medical image analysis",
+                "--schools", ",".join(schools), "--max-schools", "12",
+                "--candidate-limit", "10", "--yes"]
+        with patch.object(sys, "argv", argv), \
+             patch("recommend.AMinerClient", return_value=EmptyClient()), \
+             patch("recommend.discover_institutions", return_value=rows), \
+             patch("recommend.write_result") as write:
+            main()
+        self.assertEqual([row["organization"] for row in write.call_args.args[0]["institutions"]], schools)
 
     def test_discover_aggregates_distinct_papers_by_organization(self):
         class DiscoverClient:
@@ -511,9 +590,105 @@ class RecommendationLogicTests(unittest.TestCase):
         self.assertEqual([(r["organization_id"], r["matched_paper_count"]) for r in rows],
                          [("a", 1), ("b", 0)])
         qa = [params for api, params in client.calls if api == "paper_qa_search"]
-        self.assertEqual([p["org_id"] for p in qa], [["a"], ["b"]])
+        self.assertEqual([p["org_id"] for p in qa], [["a"], ["a"], ["b"], ["b"]])
+        self.assertEqual([bool(p.get("force_citation_sort")) for p in qa], [False, True, False, True])
         self.assertTrue(all(p["query"] == "robot learning" for p in qa))
         self.assertTrue(all(r["coverage"] == "bounded_org_id_sample" for r in rows))
+
+    def test_discover_rejects_org_id_that_conflicts_with_author_affiliation(self):
+        client = ScriptedClient({
+            "org_search": [{"org_id": "a", "org_name": "Alpha University", "aliases": []}],
+            "paper_qa_search": [{"id": "p1", "title": "Robot Learning", "year": 2025}],
+            "paper_info": [{"id": "p1", "title": "Robot Learning", "year": 2025}],
+            "paper_detail": [{"id": "p1", "title": "Robot Learning", "year": 2025,
+                              "authors": [{"name": "X", "org": "Beta University", "orgid": "a"}]}],
+        })
+        rows = discover_institutions(client, "robot learning", [], 5, [], ["Alpha University"])
+        self.assertEqual(rows[0]["matched_paper_count"], 0)
+        self.assertEqual(rows[0]["affiliation_conflicts"], 1)
+
+    def test_discover_recovers_cited_flagship_and_does_not_count_abstract_only_hit(self):
+        papers = {
+            "recent": {"id": "recent", "title": "Multimodal large language model benchmark", "year": CURRENT_YEAR},
+            "flagship": {"id": "flagship", "title": "CogVLM: Visual Expert for Pretrained Language Models",
+                         "year": CURRENT_YEAR - 2, "n_citation_bucket": "1001-5000"},
+            "incidental": {"id": "incidental", "title": "Sentiment analysis in social media",
+                           "year": CURRENT_YEAR, "abstract_slice": "A multimodal large language model is cited in related work."},
+            "hardware": {"id": "hardware", "title": "Multimodal optoelectronic memory arrays for image processing",
+                         "year": CURRENT_YEAR - 1},
+            "language_only": {"id": "language_only", "title": "Expert specialization in language models",
+                              "year": CURRENT_YEAR - 2, "n_citation_bucket": "1001-5000"},
+        }
+        client = ScriptedClient({
+            "org_search": [{"org_id": "a", "org_name": "Alpha University", "aliases": []}],
+            "paper_qa_search": lambda p: [papers["flagship"], papers["language_only"]] if p.get("force_citation_sort")
+                               else [papers["recent"], papers["incidental"], papers["hardware"]],
+            "paper_info": lambda p: [papers[pid] for pid in p["ids"]],
+            "paper_detail": lambda p: [{**papers[p["id"]],
+                "keywords": ["Multimodal Learning", "Large Language Model"] if p["id"] == "flagship"
+                            else ["Multimodal Learning"] if p["id"] == "language_only" else [],
+                "authors": [{"name": "A", "org": "Alpha University", "orgid": "a"}]}],
+        })
+        rows = discover_institutions(client, "multimodal large language model",
+                                     ["vision-language model"], 5, [], ["Alpha University"])
+        row = rows[0]
+        self.assertEqual({p["id"] for p in row["evidence_papers"] + row["representative_papers"]},
+                         {"recent", "flagship"})
+        self.assertEqual(row["flagship_paper_count"], 1)
+        self.assertEqual(row["abstract_only_paper_count"], 1)
+        self.assertEqual(row["adjacent_topic_paper_count"], 2)
+        self.assertEqual(row["representative_papers"][0]["id"], "flagship")
+
+    def test_large_school_comparison_keeps_all_counts_but_bounds_display_evidence(self):
+        schools = [f"Example {i} University" for i in range(9)]
+        client = ScriptedClient({
+            "org_search": lambda p: [{"org_id": p["orgs"][0], "org_name": p["orgs"][0], "aliases": []}],
+            "paper_qa_search": lambda p: [
+                {"id": f'{p["org_id"][0]}-{i}', "title": f"Robot Learning Study {i}",
+                 "year": CURRENT_YEAR - i, "n_citation_bucket": "201-1000"}
+                for i in range(4)
+            ],
+            "paper_info": lambda p: [{"id": pid, "title": "Robot Learning Study", "year": CURRENT_YEAR}
+                                      for pid in p["ids"]],
+            "paper_detail": lambda p: [{"id": p["id"], "title": "Robot Learning Study " + p["id"].rsplit("-", 1)[1],
+                                         "year": CURRENT_YEAR,
+                                         "authors": [{"name": "A", "org": p["id"].rsplit("-", 1)[0]}]}],
+        })
+        rows = discover_institutions(client, "robot learning", [], 5, [], schools)
+        self.assertEqual(len(rows), 9)
+        self.assertTrue(all(row["matched_paper_count"] == 4 for row in rows))
+        self.assertTrue(all(len(row["representative_papers"]) == 2 and len(row["evidence_papers"]) == 1
+                            for row in rows))
+
+    def test_citation_sample_prioritizes_direct_multimodal_work_before_generic_llm_hits(self):
+        def qa(params):
+            query = params["query"]
+            if params.get("force_citation_sort"):
+                return [
+                    {"id": query + "-generic", "title": "Expert Specialization in Language Models",
+                     "year": CURRENT_YEAR - 2, "n_citation_bucket": "1001-5000"},
+                    {"id": query + "-flagship", "title": "CogVLM: Visual Expert for Pretrained Language Models",
+                     "year": CURRENT_YEAR - 2, "n_citation_bucket": "1001-5000"},
+                ]
+            return [{"id": query + "-recent", "title": "Multimodal Large Language Model Benchmark",
+                     "year": CURRENT_YEAR}]
+        client = ScriptedClient({
+            "org_search": [{"org_id": "a", "org_name": "Alpha University", "aliases": []}],
+            "paper_qa_search": qa,
+            "paper_info": lambda p: [{"id": pid, "title": "Multimodal Large Language Model Benchmark",
+                                      "year": CURRENT_YEAR} for pid in p["ids"]],
+            "paper_detail": lambda p: [{"id": p["id"],
+                                         "title": "CogVLM: Visual Expert for Pretrained Language Models"
+                                         if p["id"].endswith("-flagship") else "Multimodal Large Language Model Benchmark",
+                                         "year": CURRENT_YEAR,
+                                         "keywords": ["Multimodal Learning", "Large Language Model"],
+                                         "authors": [{"org": "Alpha University"}]}],
+        })
+        discover_institutions(client, "multimodal large language model",
+                              ["MLLM", "vision-language model", "multimodal"], 2, [], ["Alpha University"])
+        detailed_ids = [p["id"] for api, p in client.calls if api == "paper_detail"]
+        self.assertTrue(any(pid.endswith("-flagship") for pid in detailed_ids))
+        self.assertFalse(any(pid.endswith("-generic") for pid in detailed_ids))
 
     def test_round_robin_paper_cap_preserves_alias_coverage(self):
         rows = [[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}],
