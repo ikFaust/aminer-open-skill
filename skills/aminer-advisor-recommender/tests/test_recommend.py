@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from aminer_client import AMinerAPIError, AMinerClient, CostLedger  # noqa: E402
 from recommend import (  # noqa: E402
+    CURRENT_YEAR,
     deepdive_person,
     paper_topic_relevant,
     focus_topic_relevant,
@@ -48,6 +49,7 @@ from recommend import (  # noqa: E402
     select_profile_portfolio,
     school_level_map,
     screen_recent_hires,
+    select_representative_papers,
     verify_candidate_roles,
 )
 
@@ -719,6 +721,24 @@ class PortraitEnrichTests(unittest.TestCase):
 
 
 class PersonDeepDiveTests(unittest.TestCase):
+    def test_recent_profile_sample_covers_more_than_newest_year(self):
+        papers = ([{"title": f"New {i}", "year": 2026, "recent": True, "topic_match": True}
+                   for i in range(8)] +
+                  [{"title": f"Established {i}", "year": 2025, "recent": True,
+                    "topic_match": True} for i in range(3)])
+        selected = select_representative_papers(papers, 6)
+        self.assertEqual(len(selected), 6)
+        self.assertEqual(sum(p["year"] == 2025 for p in selected), 3)
+
+    def test_duplicate_titles_from_different_aminer_ids_are_one_work(self):
+        papers = [
+            {"title": "Learning to Move Before Learning to Do", "year": 2026,
+             "recent": True, "topic_match": True, "aminer_url": "https://www.aminer.cn/pub/a"},
+            {"title": "Learning to Move Before Learning to Do", "year": 2026,
+             "recent": True, "topic_match": True, "aminer_url": "https://www.aminer.cn/pub/b"},
+        ]
+        self.assertEqual(len(select_representative_papers(papers, 5)), 1)
+
     def test_person_id_relation_recovers_recent_old_affiliation_work(self):
         client = ScriptedClient({
             "person_search": [{"id": "sjtu-liu", "name": "Fucheng Liu", "name_zh": "刘付成",
@@ -763,6 +783,141 @@ class PersonDeepDiveTests(unittest.TestCase):
             "Sample Lottery: Unsupervised Discovery of Critical Instances for LLM Reasoning", terms))
         self.assertTrue(focus_topic_relevant(
             "GEO Satellite Attitude Control", ["spacecraft attitude control", "attitude control"]))
+        self.assertTrue(focus_topic_relevant(
+            "Long-Horizon Coding Agents", ["code generation", "coding agents"]))
+        self.assertTrue(focus_topic_relevant(
+            "When Requirements Interact: Scaling Long-Horizon Coding Via Interdependent Specifications",
+            ["code generation", "coding agent"]))
+        self.assertTrue(focus_topic_relevant(
+            "Quality, Not Just Outcome: Selecting Coding-Agent Trajectories",
+            ["code generation", "coding agent"]))
+        self.assertTrue(focus_topic_relevant(
+            "Program Synthesis with Tests", ["code generation", "program synthesis"]))
+        self.assertFalse(focus_topic_relevant(
+            "Towards Codable Watermarking for LLMs", ["code generation", "coding agents"]))
+        self.assertFalse(focus_topic_relevant(
+            "CODE: Towards Partial Label Graph Learning", ["code generation", "coding agents",
+                                                         "large language model for code"]))
+        self.assertTrue(focus_topic_relevant(
+            "ToolLLM: Facilitating Large Language Models to Master Real-world APIs",
+            ["large language model", "pretraining", "instruction tuning"]))
+
+    def test_id_linked_work_is_merged_even_when_name_search_found_one_paper(self):
+        client = ScriptedClient({
+            "person_search": [{"id": "sun", "name": "Xu Sun", "name_zh": "孙栩",
+                               "org": "Peking University", "org_zh": "北京大学", "org_id": "pku"}],
+            "paper_search_pro": [{"id": "p-old", "title": "Code Generation with LLMs", "year": 2024}],
+            "paper_detail": [{"id": "p-old", "authors": [
+                {"name": "Xu Sun", "org": "Peking University", "orgid": "pku"}]}],
+            "person_paper_relation": [
+                {"id": "p-old", "author_id": "sun", "title": "Code Generation with LLMs"},
+                {"id": "p-new", "author_id": "sun", "title": "Long-Horizon Coding Agents"}],
+            "paper_info": [{"id": "p-old", "title": "Code Generation with LLMs", "year": 2024},
+                           {"id": "p-new", "title": "Long-Horizon Coding Agents", "year": 2026}],
+        })
+        profile = deepdive_person(client, "孙栩", "北京大学", False, 5, [],
+                                  ["code generation", "coding agents"])
+        titles = [p["title"] for p in profile["recent_papers"]]
+        self.assertEqual(titles, ["Long-Horizon Coding Agents", "Code Generation with LLMs"])
+        self.assertEqual(len([api for api, _ in client.calls if api == "person_paper_relation"]), 1)
+
+    def test_full_first_query_does_not_starve_second_focus_alias(self):
+        client = ScriptedClient({
+            "person_search": [{"id": "li", "name": "Ge Li", "name_zh": "李戈",
+                               "org": "Peking University", "org_zh": "北京大学", "org_id": "pku"}],
+            "paper_search_pro": lambda p: ([
+                {"id": f"primary-{i}", "title": "Code Generation with LLMs", "year": 2025}
+                for i in range(5)] if p.get("query") == "code generation" else [
+                {"id": "agent", "title": "Coding-Agent Trajectories for Software Engineering", "year": 2026}]),
+            "paper_detail": lambda p: [{"id": p["id"], "authors": [
+                {"name": "Ge Li", "org": "Peking University", "orgid": "pku"}]}],
+            "person_paper_relation": [],
+        })
+        profile = deepdive_person(client, "李戈", "北京大学", False, 5, [],
+                                  ["code generation", "coding agent"])
+        titles = [p["title"] for p in profile["recent_papers"]]
+        self.assertIn("Coding-Agent Trajectories for Software Engineering", titles)
+        searches = [p["query"] for api, p in client.calls if api == "paper_search_pro"]
+        self.assertEqual(searches, ["code generation", "code generation", "coding agent"])
+
+    def test_citation_order_adds_influential_recent_work(self):
+        client = ScriptedClient({
+            "person_search": [{"id": "liu", "name": "Zhiyuan Liu", "name_zh": "刘知远",
+                               "org": "Tsinghua University", "org_zh": "清华大学", "org_id": "thu"}],
+            "paper_search_pro": lambda p: ([
+                {"id": "influential", "title": "Tool Learning with Large Language Models", "year": 2024}]
+                if p.get("order") == "n_citation" else [
+                {"id": f"new-{i}", "title": "Large Language Model Study", "year": 2026}
+                for i in range(5)]),
+            "paper_detail": lambda p: [{"id": p["id"], "authors": [
+                {"name": "Zhiyuan Liu", "org": "Tsinghua University", "orgid": "thu"}]}],
+            "person_paper_relation": [],
+        })
+        profile = deepdive_person(client, "刘知远", "清华大学", False, 5, [],
+                                  ["large language model"])
+        self.assertIn("Tool Learning with Large Language Models",
+                      [p["title"] for p in profile["recent_papers"]])
+        self.assertFalse(profile["recent_papers_sampling"]["exhaustive"])
+        self.assertEqual(profile["recent_papers_sampling"]["limit"], 5)
+        orders = [p["order"] for api, p in client.calls if api == "paper_search_pro"]
+        self.assertEqual(orders, ["year", "n_citation"])
+
+    def test_broad_context_recovers_landmarks_without_accepting_name_collision(self):
+        client = ScriptedClient({
+            "person_search": [{"id": "liu", "name": "Zhiyuan Liu", "name_zh": "刘知远",
+                               "org": "Tsinghua University", "org_zh": "清华大学", "org_id": "thu"}],
+            "paper_search_pro": lambda p: ([
+                {"id": "sensor", "title": "Technology Roadmap for Flexible Sensors", "year": 2023},
+                {"id": "minicpm", "title": "MiniCPM: Scalable Small Language Models", "year": 2024,
+                 "n_citation_bucket": "201-1000"},
+                {"id": "feedback", "title": "UltraFeedback: Boosting Language Models", "year": 2024},
+            ] if not p.get("query") and p.get("order") == "n_citation" else [
+                {"id": "new", "title": "New Vision-Language-Action Model", "year": CURRENT_YEAR},
+            ] if not p.get("query") and p.get("order") == "year" else []),
+            "paper_detail": lambda p: [{"id": p["id"], "authors": [{
+                "name": "Zhiyuan Liu", "org": "Other University" if p["id"] == "sensor"
+                else "Tsinghua University", "orgid": "other" if p["id"] == "sensor" else "thu",
+            }]}],
+            "person_paper_relation": [],
+        })
+        profile = deepdive_person(client, "刘知远", "清华大学", False, 5, [],
+                                  ["large language model"], broad_context=True)
+        titles = [p["title"] for p in profile["broad_context_papers"]]
+        self.assertEqual(titles, ["MiniCPM: Scalable Small Language Models",
+                                  "UltraFeedback: Boosting Language Models"])
+        self.assertTrue(all(p["source"] == "citation_ranked_author_verified"
+                            for p in profile["broad_context_papers"]))
+        self.assertEqual([p["title"] for p in profile["recent_context_papers"]],
+                         ["New Vision-Language-Action Model"])
+        self.assertFalse(profile["recent_context_papers"][0]["topic_match"])
+        broad_calls = [p for api, p in client.calls if api == "paper_search_pro" and not p.get("query")]
+        self.assertEqual([p["order"] for p in broad_calls], ["n_citation", "year"])
+        self.assertTrue(all((p["year_from"], p["year_to"]) == (CURRENT_YEAR - 5, CURRENT_YEAR)
+                            for p in broad_calls))
+        self.assertGreater(estimate_person_cost(2, 10, True, 6, True)["worst_case_cny"],
+                           estimate_person_cost(2, 10, True, 6)["worst_case_cny"])
+
+    def test_relation_prioritizes_focused_title_outside_newest_200_ids(self):
+        rows = [{"id": f"z{i:03}", "author_id": "person1", "title": "Unrelated Graph Study"}
+                for i in range(230)]
+        rows.append({"id": "a-focused", "author_id": "person1", "title": "Program Synthesis with Tests"})
+        client = ScriptedClient({
+            "person_paper_relation": rows,
+            "paper_info": lambda p: [{"id": "a-focused", "title": "Program Synthesis with Tests", "year": 2026}]
+            if "a-focused" in p["ids"] else [],
+        })
+        papers = linked_recent_papers(client, "person1", ["code generation", "program synthesis"], 5, [])
+        self.assertEqual([p["title"] for p in papers], ["Program Synthesis with Tests"])
+
+    def test_relation_abstract_incidental_focus_does_not_prove_topic(self):
+        client = ScriptedClient({
+            "person_paper_relation": [{"id": "p1", "author_id": "person1",
+                                       "title": "Alpha Mining in Finance"}],
+            "paper_info": [{"id": "p1", "title": "Alpha Mining in Finance", "year": 2026,
+                            "abstract_slice": "Large language models for code generation are unrelated background."}],
+        })
+        papers = linked_recent_papers(client, "person1", ["code generation"], 5, [])
+        self.assertFalse(papers[0]["topic_match"])
 
     def test_paper_topic_relevance_flags_low_overlap(self):
         interests = ["Attitude Control", "Geo Satellite", "Reaction Wheel"]
@@ -789,6 +944,8 @@ class PersonDeepDiveTests(unittest.TestCase):
                         {"id": "p2", "title": "Plasma Photonic Crystal", "year": 2026},
                         {"id": "p3", "title": "Valley Topological States", "year": 2026},
                     ]}
+                if api == "person_paper_relation":
+                    return {"success": True, "data": []}
                 raise AssertionError(api)
 
         # school given, exactly one org matches -> confident deep-dive of a2 (not the higher-cited a1)
@@ -857,18 +1014,49 @@ class PersonDeepDiveTests(unittest.TestCase):
                 if p["id"] == marco else
                 {"name": "Ming Zhang", "org": "Fudan University", "orgid": "fudan"}
             ]}],
+            "person_paper_relation": [],
         })
         warnings = []
         profile = deepdive_person(client, "张铭", "北京大学", False, 10, warnings, ["code"])
         self.assertEqual([p["aminer_url"].split("/")[-1] for p in profile["recent_papers"]], [marco])
         self.assertTrue(profile["recent_papers"][0]["topic_match"])
         searches = [p for api, p in client.calls if api == "paper_search_pro"]
-        self.assertEqual(len(searches), 1)
-        self.assertEqual(searches[0]["query"], "code")
-        self.assertEqual(searches[0]["org"], "Peking University")
-        self.assertNotIn("keyword", searches[0])
+        self.assertEqual(len(searches), 2)
+        self.assertEqual([p["order"] for p in searches], ["year", "n_citation"])
+        self.assertTrue(all(p["query"] == "code" and p["org"] == "Peking University"
+                            and "keyword" not in p for p in searches))
         self.assertEqual(len([api for api, _ in client.calls if api == "paper_detail"]), 2)
         self.assertTrue(any("未核实到该校同名作者" in w for w in warnings))
+
+    def test_exact_chinese_name_excludes_longer_fuzzy_match_at_same_school(self):
+        client = ScriptedClient({
+            "person_search": [
+                {"id": "li-ge", "name": "Ge Li", "name_zh": "李戈", "org": "Peking University",
+                 "org_zh": "北京大学", "n_citation": 100},
+                {"id": "li-gehui", "name": "Gehui Li", "name_zh": "李戈辉", "org": "Peking University",
+                 "org_zh": "北京大学", "n_citation": 2000},
+            ],
+            "paper_search_pro": [], "person_paper_relation": [],
+        })
+        profile = deepdive_person(client, "李戈", "北京大学", False, 5, [])
+        self.assertFalse(profile["needs_disambiguation"])
+        self.assertEqual(profile["person_id"], "li-ge")
+
+    def test_incidental_abstract_terms_do_not_make_watermarking_code_work(self):
+        client = ScriptedClient({
+            "person_search": [{"id": "sun", "name": "Xu Sun", "name_zh": "孙栩",
+                               "org": "Peking University", "org_zh": "北京大学", "org_id": "pku"}],
+            "paper_search_pro": [{"id": "watermark", "title": "Codable Text Watermarking for LLMs",
+                                  "year": 2024}],
+            "paper_detail": [{"id": "watermark", "authors": [
+                {"name": "Xu Sun", "org": "Peking University", "orgid": "pku"}],
+                "keywords": ["text watermarking", "large language model"],
+                "abstract": "Code generation is one of many contexts for language models."}],
+            "person_paper_relation": [],
+        })
+        profile = deepdive_person(client, "孙栩", "北京大学", False, 5, [],
+                                  ["code generation", "coding agents"])
+        self.assertEqual(profile["recent_papers"], [])
 
     def test_school_constraint_does_not_pick_other_school_by_citations(self):
         client = ScriptedClient({"person_search": [

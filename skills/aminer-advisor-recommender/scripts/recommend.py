@@ -1039,15 +1039,21 @@ def estimate_cost(
     }
 
 
-def estimate_person_cost(name_count: int, paper_limit: int, deep: bool, focus_alias_count: int) -> dict[str, Any]:
+def estimate_person_cost(name_count: int, paper_limit: int, deep: bool, focus_alias_count: int,
+                         broad_context: bool = False) -> dict[str, Any]:
     """Bound a focused name search, author checks, and optional ID-linked fallback."""
-    searches = min(3, focus_alias_count) if focus_alias_count else 1
+    searches = min(6, focus_alias_count) + 1 if focus_alias_count else 1
     detail_calls = name_count * paper_limit if focus_alias_count else 0
     relation_calls = name_count  # only used when current-org search has no usable recent paper
     cost = name_count * searches * API_SPEC["paper_search_pro"][2]
     cost += detail_calls * API_SPEC["paper_detail"][2]
     cost += relation_calls * API_SPEC["person_paper_relation"][2]
     cost += name_count * int(deep) * API_SPEC["person_detail"][2]
+    if broad_context and focus_alias_count:
+        cost += name_count * (2 * API_SPEC["paper_search_pro"][2]
+                              + 40 * API_SPEC["paper_detail"][2])
+        searches += 2
+        detail_calls += name_count * 40
     return {"worst_case_cny": round(cost, 2), "paper_search_pro_calls": name_count * searches,
             "paper_detail_calls": detail_calls, "person_paper_relation_calls": relation_calls,
             "person_detail_calls": name_count * int(deep)}
@@ -1429,6 +1435,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--direction", default="", help="Required for all modes except person")
     parser.add_argument("--names", default="", help="Comma-separated scholar name(s) for person mode; multiple names = comparison")
     parser.add_argument("--deep", action="store_true", help="person mode: also fetch person_detail (¥1/person) for position/education/honors")
+    parser.add_argument("--broad-context", action="store_true", help="person mode: add author-verified, citation-ranked recent work beyond the focus-query sample")
     parser.add_argument("--aliases", default="")
     parser.add_argument("--school", default="")
     parser.add_argument("--schools", default="")
@@ -1496,7 +1503,21 @@ def paper_topic_relevant(title: str, interests: list[str]) -> bool:
 FOCUS_GENERIC_TOKENS = {
     "llm", "large", "language", "model", "models", "machine", "deep", "learning",
     "artificial", "intelligence", "research", "study", "studies",
+    "for", "with", "and", "the", "from", "using", "via", "towards", "toward",
+    "into", "over", "under", "based", "this", "that", "through", "between",
 }
+
+
+FOCUS_TOKEN_EQUIVALENTS = {
+    "coding": "code", "coded": "code", "program": "code", "programming": "code",
+    "programs": "code", "generating": "generation", "generated": "generation",
+    "generate": "generation", "generative": "generation", "synthesis": "generation",
+    "agents": "agent", "agentic": "agent", "reason": "reasoning",
+}
+
+
+def focus_tokens(text: str) -> set[str]:
+    return {FOCUS_TOKEN_EQUIVALENTS.get(token, token) for token in tokens(text.replace("-", " "))}
 
 
 def focus_topic_relevant(text: str, focus_terms: list[str]) -> bool:
@@ -1505,19 +1526,41 @@ def focus_topic_relevant(text: str, focus_terms: list[str]) -> bool:
     Broad recall aliases such as "LLM" can find papers, but must not make every
     generic LLM paper a positive match for a narrower "LLM code reasoning" ask.
     """
-    paper_tokens = tokens(text)
+    paper_tokens = focus_tokens(text)
     def anchor(term: str) -> set[str]:
-        return {token for token in tokens(term) if token not in FOCUS_GENERIC_TOKENS
+        return {token for token in focus_tokens(term) if token not in FOCUS_GENERIC_TOKENS
                 and re.fullmatch(r"[a-z][a-z0-9+.-]{1,}", token)}
     primary_anchor = anchor(focus_terms[0]) if focus_terms else set()
+    if focus_terms and not primary_anchor and contains_any(text, [focus_terms[0]]):
+        return True
+    if "code" in primary_anchor and re.search(r"\b(coding|programming)\b", text, re.I):
+        # Coding-agent and long-horizon coding titles are relevant to code
+        # generation, even when they do not repeat the word "generation".
+        # Require a second software-task cue so qualitative "coding" is not enough.
+        if paper_tokens & {"agent", "requirements", "software", "repository",
+                           "completion", "reasoning", "generation", "llm"}:
+            return True
     for term in focus_terms:
         term_anchor = anchor(term)
         # Generic aliases improve retrieval but cannot turn an unrelated paper
         # into a positive match. Keep aliases tied to a distinctive primary focus.
-        if term_anchor and (not primary_anchor or term_anchor & primary_anchor):
+        # A two-part focus needs two specific pieces of evidence. A one-word
+        # alias such as "code" is too broad and also matches unrelated acronyms.
+        # A specific two-token alias can be a synonym without literal overlap
+        # (program synthesis/code generation).
+        if term_anchor and len(term_anchor) >= min(2, len(primary_anchor)):
             if term_anchor <= paper_tokens:
                 return True
     return not any(anchor(term) for term in focus_terms) and contains_any(text, focus_terms)
+
+
+def broad_context_topic_relevant(text: str, focus_terms: list[str]) -> bool:
+    """Permit title-language variants only in the optional broad LLM portrait."""
+    if focus_topic_relevant(text, focus_terms):
+        return True
+    primary = normalized_text(focus_terms[0]) if focus_terms else ""
+    return primary in {"large language model", "large language models", "llm"} and bool(
+        re.search(r"\b(?:language models?|llms?|mllms?)\b", text, re.I))
 
 
 def _confident_person_pick(rows: list[dict[str, Any]], school: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
@@ -1565,11 +1608,19 @@ def linked_recent_papers(
     except AMinerAPIError as exc:
         warnings.append(f"人物论文关系查询失败（{person_id}）：{exc.message}")
         return []
-    ids = list(dict.fromkeys(str(row.get("id") or "") for row in relation
-                             if str(row.get("author_id") or "") == person_id and row.get("id")))
+    relation_rows = [row for row in relation
+                     if str(row.get("author_id") or "") == person_id and row.get("id")]
+    ids = list(dict.fromkeys(str(row["id"]) for row in relation_rows))
     if not ids:
         return []
-    selected = sorted(ids, reverse=True)[:200]
+    # Relation IDs encode ingestion order only imperfectly. Reserve the first
+    # part of the bounded paper_info sample for matching titles across the FULL
+    # relation, so a prolific scholar's focused work is not lost below ID #200.
+    focused = list(dict.fromkeys(
+        str(row["id"]) for row in relation_rows
+        if focus_terms and focus_topic_relevant(str(row.get("title") or ""), focus_terms)
+    ))
+    selected = list(dict.fromkeys(sorted(focused, reverse=True)[:100] + sorted(ids, reverse=True)))[:200]
     if len(ids) > len(selected):
         warnings.append(f"人物论文关系有 {len(ids)} 篇，仅核对其中 200 个较新入库 ID；不能据此断言其他年份无成果")
     info: list[dict[str, Any]] = []
@@ -1588,18 +1639,66 @@ def linked_recent_papers(
             continue
         if year < CURRENT_YEAR - 5 or year > CURRENT_YEAR:
             continue
-        text = " ".join((title, str(row.get("abstract_slice") or "")))
-        topic_match = focus_topic_relevant(text, focus_terms) if focus_terms else True
+        # paper_info only gives a short abstract slice and no validated topic
+        # label. Incidental wording there caused finance/education papers to be
+        # mislabelled as code-generation work. Keep those as broad recent context.
+        topic_match = focus_topic_relevant(title, focus_terms) if focus_terms else True
         papers.append({"year": year, "title": title, "recent": True,
                        "topic_match": topic_match, "source": "person_paper_relation",
                        "aminer_url": f"https://www.aminer.cn/pub/{paper_id}"})
-    papers.sort(key=lambda row: (row["topic_match"], row["year"], row["title"]), reverse=True)
-    return papers[:limit]
+    return select_representative_papers(papers, limit)
+
+
+def select_representative_papers(papers: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Keep focus evidence first while covering more than the newest calendar year."""
+    chosen: list[dict[str, Any]] = []
+    unique: dict[str, dict[str, Any]] = {}
+    for paper in papers:
+        key = re.sub(r"[\W_]+", "", normalized_text(paper.get("title")))
+        if key:
+            unique.setdefault(key, paper)
+    yearly_cap = max(2, (limit + 1) // 2)
+    for on_topic in (True, False):
+        group = sorted(
+            (p for p in unique.values() if bool(p.get("topic_match")) == on_topic),
+            key=lambda p: (bool(p.get("recent")),
+                           p.get("year") if isinstance(p.get("year"), int) else 0,
+                           str(p.get("title") or "")), reverse=True,
+        )
+        counts: Counter[int] = Counter()
+        first_pass: list[dict[str, Any]] = []
+        overflow: list[dict[str, Any]] = []
+        for paper in group:
+            year = paper.get("year") if isinstance(paper.get("year"), int) else 0
+            if paper.get("recent") and counts[year] < yearly_cap:
+                first_pass.append(paper)
+                counts[year] += 1
+            else:
+                overflow.append(paper)
+        chosen.extend((first_pass + overflow)[: max(0, limit - len(chosen))])
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
+def same_scholar_at_university(details: list[dict[str, Any]], chosen: dict[str, Any],
+                               school: str, search_org: str) -> bool:
+    org_variants = [str(chosen.get("org") or ""), str(chosen.get("org_zh") or ""), school, search_org]
+    org_variants += [item.replace("University", "Univ").replace("university", "univ")
+                     for item in org_variants if item]
+    return any(
+        normalized_person_name(author.get("name")) == normalized_person_name(chosen.get("name"))
+        and ((bool(chosen.get("org_id") and author.get("orgid"))
+              and str(author["orgid"]) == str(chosen["org_id"]))
+             or contains_any(str(author.get("org") or ""), org_variants))
+        for detail in details for author in detail.get("authors") or [] if isinstance(author, dict)
+    )
 
 
 def deepdive_person(
     client: AMinerClient, name: str, school: str, deep: bool, paper_limit: int, warnings: list[str],
     focus_terms: list[str] | None = None,
+    broad_context: bool = False,
 ) -> dict[str, Any]:
     """Resolve one scholar by name (+optional school) and return an evidence-bearing profile."""
     params = {"name": name, "size": 10}
@@ -1611,6 +1710,26 @@ def deepdive_person(
     if not rows:
         return {"query_name": name, "query_school": school or None, "found": False,
                 "note": "AMiner 未找到该学者；请确认姓名/学校或补充信息"}
+
+    # person_search is fuzzy: 李戈 also returns 李戈辉. Never let a high citation
+    # count or the shared university turn a different full name into the target.
+    exact_rows = [row for row in rows if any(
+        normalized_person_name(row.get(field)) == normalized_person_name(name)
+        for field in ("name_zh", "name") if row.get(field)
+    )]
+    if exact_rows:
+        rows = exact_rows
+    else:
+        warnings.append(f"'{name}' 仅检到近似姓名，未自动认定为该学者")
+        return {"query_name": name, "query_school": school or None, "found": True,
+                "needs_disambiguation": True,
+                "note": "AMiner 仅返回近似姓名；请核对学者全名或提供主页",
+                "candidates": [
+                    {"person_id": str(r.get("id") or ""),
+                     "name": r.get("name_zh") or r.get("name"),
+                     "organization": r.get("org_zh") or r.get("org")}
+                    for r in rows[:6]
+                ]}
 
     chosen, contenders = _confident_person_pick(rows, school)
     if chosen is None:
@@ -1652,30 +1771,33 @@ def deepdive_person(
     # Search the user's requested focus through the title+keyword query box.
     # A general by-name list is useful only when no specific focus was supplied.
     focus_terms = [term for term in (focus_terms or []) if term]
-    search_focus_terms = focus_terms[:3]
+    search_focus_terms = focus_terms[:6]
     papers: list[dict[str, Any]] = []
     low_overlap = 0
-    rows_p: list[dict[str, Any]] = []
-    seen_papers: set[str] = set()
+    rows_by_term: list[list[dict[str, Any]]] = []
+    search_rows: dict[str, dict[str, Any]] = {}
     search_org = extract_institution_name(str(chosen.get("org") or "")) or school
-    for focus in (search_focus_terms or [""]):
-        params = {"author": chosen.get("name"), "org": search_org,
-                  "order": "year", "page": 0, "size": paper_limit}
-        if focus:
-            params.update(query=focus, year_from=CURRENT_YEAR - 5, year_to=CURRENT_YEAR)
-        try:
-            found = unwrap(client.call("paper_search_pro", params))
-        except AMinerAPIError as exc:
-            warnings.append(f"论文检索失败（{name}，{focus or 'general'}）：{exc.message}")
-            continue
-        for row in found:
-            paper_id = str(row.get("id") or "")
-            if paper_id and paper_id not in seen_papers:
-                rows_p.append(row)
-                seen_papers.add(paper_id)
-        if len(rows_p) >= paper_limit:
-            break
-    for r in rows_p[:paper_limit]:
+    for index, focus in enumerate(search_focus_terms or [""]):
+        # The primary term gets both recent and citation-order samples. A
+        # year-only top page misses influential recent foundations; the
+        # citation page is still constrained to the same five-year window.
+        for order in (("year", "n_citation") if focus and index == 0 else ("year",)):
+            params = {"author": chosen.get("name"), "org": search_org,
+                      "order": order, "page": 0, "size": paper_limit}
+            if focus:
+                params.update(query=focus, year_from=CURRENT_YEAR - 5, year_to=CURRENT_YEAR)
+            try:
+                found = unwrap(client.call("paper_search_pro", params))
+            except AMinerAPIError as exc:
+                warnings.append(f"论文检索失败（{name}，{focus or 'general'}，{order}）：{exc.message}")
+                continue
+            for row in found:
+                paper_id = str(row.get("id") or "")
+                if paper_id:
+                    search_rows.setdefault(paper_id, row)
+            rows_by_term.append(found)
+    sampled_ids = bounded_paper_ids(rows_by_term, paper_limit)
+    for r in (search_rows[pid] for pid in sampled_ids):
         title = str(r.get("title") or "").strip()
         if not title:
             continue
@@ -1686,26 +1808,16 @@ def deepdive_person(
             except AMinerAPIError as exc:
                 warnings.append(f"论文作者核验失败（{name}，{paper_id}）：{exc.message}")
                 details = []
-            org_variants = [str(chosen.get("org") or ""), str(chosen.get("org_zh") or ""), school, search_org]
-            org_variants += [item.replace("University", "Univ").replace("university", "univ")
-                             for item in org_variants if item]
-            matching_author = any(
-                normalized_person_name(author.get("name")) == normalized_person_name(chosen.get("name"))
-                and (
-                    bool(chosen.get("org_id") and author.get("orgid"))
-                    and str(author["orgid"]) == str(chosen["org_id"])
-                    or contains_any(str(author.get("org") or ""), org_variants)
-                )
-                for detail in details for author in detail.get("authors") or [] if isinstance(author, dict)
-            )
+            matching_author = same_scholar_at_university(details, chosen, school, search_org)
             if not matching_author:
                 warnings.append(f"{name}: {paper_id} 未核实到该校同名作者，未列为该导师成果")
                 continue
-            detail_text = " ".join(
-                [title] + [str(d.get("abstract") or "") + " " + " ".join(
-                    str(k) for k in d.get("keywords") or []) for d in details]
-            )
-            on_topic = focus_topic_relevant(detail_text, focus_terms)
+            # Abstracts routinely mention generic LLM code generation as context
+            # even when the work itself is about another task (e.g. watermarking).
+            # Require the requested focus in the title or author keywords.
+            focus_evidence = " ".join([title] + [" ".join(
+                str(k) for k in d.get("keywords") or []) for d in details])
+            on_topic = focus_topic_relevant(focus_evidence, focus_terms)
         else:
             on_topic = paper_topic_relevant(title, interests)
         if not on_topic:
@@ -1732,21 +1844,121 @@ def deepdive_person(
             warnings.append(
                 f"{name}: 按姓名检索到的近期论文疑似被同名严重污染（{len(papers)-len(kept)}/{len(papers)} 不相关），"
                 "已仅保留与研究兴趣相符者；完整可靠列表请查 AMiner 主页")
-        profile["recent_papers"] = kept
+        profile["recent_papers"] = select_representative_papers(kept, paper_limit)
     else:
         if low_overlap:
             subject = "指定方向" if focus_terms else "研究兴趣"
             warnings.append(f"{name}: {low_overlap} 篇近期论文与{subject}词重合低，可能是同名混入或跨子方向，已标记待核（topic_match=false）")
-        profile["recent_papers"] = papers
-    if pid and not any(p.get("topic_match") and p.get("recent") for p in profile["recent_papers"]):
+        profile["recent_papers"] = select_representative_papers(papers, paper_limit)
+    recent_matches = sum(bool(p.get("topic_match") and p.get("recent"))
+                         for p in profile["recent_papers"])
+    if pid and recent_matches < min(5, paper_limit):
         linked = linked_recent_papers(client, pid, focus_terms, paper_limit, warnings)
         if linked:
-            profile["recent_papers"] = linked
-            profile["recent_papers_reliable"] = True
+            merged = {p.get("aminer_url"): p for p in profile["recent_papers"]}
+            for paper in linked:
+                merged.setdefault(paper.get("aminer_url"), paper)
+            profile["recent_papers"] = select_representative_papers(
+                list(merged.values()), paper_limit)
             warnings.append(
-                f"{name}: 当前机构的按名论文检索没有可用的近期成果；已改用人物 ID 论文关系补召回，"
-                "关联关系和年份已核对，正式发表与具体作者单位仍需原文确认"
+                f"{name}: 当前机构的按名论文检索只有 {recent_matches} 篇可用的近期方向成果；"
+                "已合并人物 ID 论文关系补召回，关联关系和年份已核对，正式发表与具体作者单位仍需原文确认"
             )
+    if broad_context and focus_terms:
+        # Broad portraits need a second, unfiltered view. A focus query capped at
+        # ten papers can omit the scholar's model families and landmark work.
+        # Keep this separate from direct focus evidence and verify each author.
+        try:
+            broad_rows = unwrap(client.call("paper_search_pro", {
+                "author": chosen.get("name"), "org": search_org,
+                "order": "n_citation", "page": 0, "size": 100,
+                "year_from": CURRENT_YEAR - 5, "year_to": CURRENT_YEAR,
+            }))
+        except AMinerAPIError as exc:
+            warnings.append(f"{name}: 广义代表作补检失败：{exc.message}")
+            broad_rows = []
+        seen_titles = {re.sub(r"[\W_]+", "", normalized_text(p.get("title")))
+                       for p in profile["recent_papers"]}
+        context_candidates = []
+        for row in broad_rows[:20]:
+            paper_id = str(row.get("id") or "")
+            title = str(row.get("title") or "").strip()
+            year = row.get("year")
+            title_key = re.sub(r"[\W_]+", "", normalized_text(title))
+            if not paper_id or not title or title_key in seen_titles or not isinstance(year, int):
+                continue
+            if not CURRENT_YEAR - 5 <= year <= CURRENT_YEAR:
+                continue
+            try:
+                details = unwrap(client.call("paper_detail", {"id": paper_id}))
+            except AMinerAPIError as exc:
+                warnings.append(f"{name}: 代表作作者核验失败（{paper_id}）：{exc.message}")
+                continue
+            matching_author = same_scholar_at_university(details, chosen, school, search_org)
+            if not matching_author:
+                continue
+            seen_titles.add(title_key)
+            keywords = " ".join(str(k) for detail in details for k in detail.get("keywords") or [])
+            context_candidates.append({"year": year, "title": title,
+                            "topic_match": broad_context_topic_relevant(title + " " + keywords, focus_terms),
+                            "source": "citation_ranked_author_verified",
+                            "n_citation_bucket": row.get("n_citation_bucket"),
+                            "aminer_url": f"https://www.aminer.cn/pub/{paper_id}"})
+        topical = [paper for paper in context_candidates if paper["topic_match"]]
+        adjacent = [paper for paper in context_candidates if not paper["topic_match"]]
+        context = topical[:4] + adjacent[:2]
+        for paper in context_candidates:
+            if len(context) >= 6:
+                break
+            if paper not in context:
+                context.append(paper)
+        profile["broad_context_papers"] = context
+        # Citation rank favors established work. A separate newest-year pass
+        # exposes emerging branches that have not accrued citations yet.
+        try:
+            recent_rows = unwrap(client.call("paper_search_pro", {
+                "author": chosen.get("name"), "org": search_org,
+                "order": "year", "page": 0, "size": 100,
+                "year_from": CURRENT_YEAR - 5, "year_to": CURRENT_YEAR,
+            }))
+        except AMinerAPIError as exc:
+            warnings.append(f"{name}: 最新工作补检失败：{exc.message}")
+            recent_rows = []
+        excluded = {re.sub(r"[\W_]+", "", normalized_text(p.get("title")))
+                    for p in profile["recent_papers"] + context}
+        recent_context = []
+        for row in recent_rows[:20]:
+            paper_id = str(row.get("id") or "")
+            title = str(row.get("title") or "").strip()
+            year = row.get("year")
+            title_key = re.sub(r"[\W_]+", "", normalized_text(title))
+            if not paper_id or not title or title_key in excluded or not isinstance(year, int):
+                continue
+            if not CURRENT_YEAR - 5 <= year <= CURRENT_YEAR:
+                continue
+            try:
+                details = unwrap(client.call("paper_detail", {"id": paper_id}))
+            except AMinerAPIError as exc:
+                warnings.append(f"{name}: 最新工作作者核验失败（{paper_id}）：{exc.message}")
+                continue
+            if not same_scholar_at_university(details, chosen, school, search_org):
+                continue
+            excluded.add(title_key)
+            keywords = " ".join(str(k) for detail in details for k in detail.get("keywords") or [])
+            recent_context.append({
+                "year": year, "title": title,
+                "topic_match": broad_context_topic_relevant(title + " " + keywords, focus_terms),
+                "source": "recent_author_verified",
+                "aminer_url": f"https://www.aminer.cn/pub/{paper_id}",
+            })
+            if len(recent_context) >= 10:
+                break
+        profile["recent_context_papers"] = recent_context
+    profile["recent_papers_sampling"] = {
+        "selected": len(profile["recent_papers"]), "limit": paper_limit,
+        "exhaustive": False,
+        "note": "所列篇数是有限检索样本，不是该学者的方向论文总数或可比较的产出率",
+    }
     profile["needs_verification"] = ["当前招生名额与是否在招", "是否仍在该机构任职"]
     return profile
 
@@ -1760,7 +1972,8 @@ def main() -> None:
         if args.paper_limit < 1:
             raise SystemExit("--paper-limit must be positive")
         focus_terms = direction_aliases(args.direction, aliases=parse_csv(args.aliases))
-        estimate = estimate_person_cost(len(names), args.paper_limit, args.deep, len(focus_terms))
+        estimate = estimate_person_cost(len(names), args.paper_limit, args.deep, len(focus_terms),
+                                        args.broad_context)
         if estimate["worst_case_cny"] >= args.max_cost and not args.yes:
             raise SystemExit(
                 f"Worst-case API cost estimate ¥{estimate['worst_case_cny']:.2f} reaches --max-cost ¥{args.max_cost:.2f}; "
@@ -1773,17 +1986,18 @@ def main() -> None:
         warnings: list[str] = []
         profiles = [deepdive_person(
             client, n, args.school, args.deep, args.paper_limit, warnings,
-            focus_terms=focus_terms,
+            focus_terms=focus_terms, broad_context=args.broad_context,
         ) for n in names]
         result = {
             "workflow": "person", "count": len(profiles), "is_comparison": len(profiles) > 1,
             "query": {"names": names, "school": args.school or None, "deep": args.deep,
-                      "focus": args.direction or None, "aliases": parse_csv(args.aliases)},
+                      "focus": args.direction or None, "aliases": parse_csv(args.aliases),
+                      "broad_context": args.broad_context},
             "profiles": profiles, "warnings": list(dict.fromkeys(warnings)), "errors": [],
             "cost_estimate": estimate, "cost": client.cost.summary(),
             "method_notes": [
                 "人名深挖：person_search 消歧（免费）+ 可选 person_detail（¥1）+ paper_search_pro 近期论文（¥0.01）。",
-                "指定方向时用 query 检索标题及关键词，并核对论文作者机构；缺少近期方向论文时按人物 ID 的论文关系补召回。",
+                "指定方向时用 query 检索标题及关键词，并核对论文作者机构；近期方向论文少于五篇时按人物 ID 的论文关系补召回。",
                 "招生名额与在职状态 AMiner 无数据，须用户到官方页面核实。",
             ],
         }
