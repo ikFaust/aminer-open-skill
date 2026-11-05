@@ -28,6 +28,7 @@ from recommend import (  # noqa: E402
     classify_org,
     clean_paper,
     choose_profile_expansion_schools,
+    should_auto_expand_profile,
     discover_institutions,
     enrich_collaboration,
     enrich_from_portrait,
@@ -51,6 +52,8 @@ from recommend import (  # noqa: E402
     score_candidates,
     select_profile_portfolio,
     school_level_map,
+    school_search_terms,
+    official_directory_hints,
     screen_recent_hires,
     select_representative_papers,
     verify_candidate_roles,
@@ -82,6 +85,32 @@ def tiers():
 
 
 class RecommendationLogicTests(unittest.TestCase):
+    def test_robot_applicant_prefers_specific_seed_over_bare_lidar(self):
+        terms = school_search_terms(
+            "robot perception", ["point cloud", "LiDAR", "SLAM", "3D perception"],
+            {"target_degree": "phd"})
+        self.assertEqual(terms, ["robot perception", "point cloud", "SLAM"])
+        self.assertEqual(
+            school_search_terms("机器人感知", ["point cloud", "LiDAR", "SLAM"], {"target_degree": "phd"}),
+            ["机器人感知", "point cloud", "SLAM"])
+        self.assertEqual(
+            school_search_terms("atmospheric LiDAR", ["LiDAR", "aerosol"], {"target_degree": "phd"}),
+            ["atmospheric LiDAR", "LiDAR", "aerosol"])
+        self.assertEqual(
+            school_search_terms("robot perception", ["LiDAR"], {"target_degree": "phd"}),
+            ["robot perception", "LiDAR"])
+
+    def test_official_directory_seed_is_scoped_and_requires_live_verification(self):
+        hints = official_directory_hints(["浙江大学", "清华大学"], "机器人感知")
+        self.assertEqual(hints["浙江大学"][0]["url"], "https://www.cse.zju.edu.cn")
+        self.assertIn("re-fetch", hints["浙江大学"][0]["scope"])
+        self.assertEqual(hints["清华大学"][0]["url"], "https://www.au.tsinghua.edu.cn")
+        self.assertEqual(official_directory_hints(["浙江大学"], "光纤通信"), {})
+        p2_hints = official_directory_hints(["复旦大学", "上海交通大学", "苏州大学"], "multimodal")
+        self.assertEqual(p2_hints["复旦大学"][0]["url"], "https://cs.fudan.edu.cn/szdw/list.htm")
+        self.assertEqual(p2_hints["苏州大学"][0]["url"], "https://scst.suda.edu.cn/11250/list.htm")
+        self.assertNotIn("上海交通大学", p2_hints)
+
     def test_string_target_cycle_gives_correct_november_exam_timing(self):
         timing = application_timing(date(2026, 11, 4),
                                     {"target_degree": "master", "target_cycle": "2027"})
@@ -478,6 +507,13 @@ class RecommendationLogicTests(unittest.TestCase):
         )
         self.assertEqual(result, ["Example Provincial University"])
 
+    def test_profile_expansion_respects_explicit_school_boundary(self):
+        self.assertFalse(should_auto_expand_profile("profile", True, False, False))
+        self.assertTrue(should_auto_expand_profile("profile", False, False, False))
+        self.assertTrue(should_auto_expand_profile("profile", True, False, True))
+        self.assertFalse(should_auto_expand_profile("profile", False, True, False))
+        self.assertFalse(should_auto_expand_profile("named", False, False, True))
+
     def test_profile_portfolio_keeps_available_lower_risk_bands_visible(self):
         rows = []
         for index in range(8):
@@ -491,6 +527,17 @@ class RecommendationLogicTests(unittest.TestCase):
         selected = select_profile_portfolio([*rows, match, safer], 5)
         self.assertIn("m", {row.person_id for row in selected})
         self.assertIn("s", {row.person_id for row in selected})
+
+    def test_named_school_profile_keeps_one_lead_from_each_available_school(self):
+        rows = []
+        for index, school in enumerate(["清华大学", "清华大学", "清华大学", "浙江大学", "上海交通大学"]):
+            row = Candidate(person_id=f"p{index}", name=f"Person {index}", source_schools={school})
+            row.recommendation_band = "冲刺（启发式）"
+            rows.append(row)
+        selected = select_profile_portfolio(rows, 3, ["清华大学", "浙江大学", "上海交通大学"])
+        self.assertEqual({s for row in selected for s in row.source_schools},
+                         {"清华大学", "浙江大学", "上海交通大学"})
+        self.assertEqual(len(selected), 3)
 
     def test_obvious_cross_discipline_affiliation_is_filtered(self):
         medical = Candidate(person_id="m", name="A", org="University Hospital")

@@ -12,16 +12,19 @@ import sys
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 from aminer_client import API_SPEC, AMinerAPIError, AMinerClient, unwrap
 
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TIERS = SKILL_ROOT / "references" / "school-tiers.json"
-CURRENT_YEAR = datetime.now(timezone.utc).year
+DIRECTORY_SEEDS = SKILL_ROOT / "references" / "official-directory-seeds.json"
+CHINA_TZ = ZoneInfo("Asia/Shanghai")
+CURRENT_YEAR = datetime.now(CHINA_TZ).year
 FACULTY_TERMS = (
     "professor", "associate professor", "assistant professor", "researcher", "principal investigator",
     "教授", "副教授", "研究员", "副研究员", "博导", "博士生导师", "硕导", "硕士生导师",
@@ -89,6 +92,43 @@ def contains_any(text: str, terms: Iterable[str]) -> bool:
 
 def direction_aliases(direction: str, aliases: list[str]) -> list[str]:
     return list(dict.fromkeys(x.strip() for x in [direction, *aliases] if x and x.strip()))
+
+
+def school_search_terms(direction: str, aliases: list[str], applicant: dict[str, Any] | None) -> list[str]:
+    """Keep an ambiguous sensor term from crowding out task-specific seeds.
+
+    Bare LiDAR returns atmospheric and optical-instrument papers as well as
+    robotics papers. For a robotics applicant, prefer a third specific alias
+    such as SLAM when one is available; keep bare LiDAR for LiDAR research
+    requests or when there are fewer than three alternatives.
+    """
+    terms = direction_aliases(direction, aliases)
+    if applicant and ("robot" in normalized_text(direction) or "机器人" in direction):
+        specific = [term for term in terms if normalized_text(term) != "lidar"]
+        if len(specific) >= 3:
+            terms = specific
+    return terms[:3]
+
+
+def official_directory_hints(schools: list[str], direction: str) -> dict[str, list[dict[str, str]]]:
+    """Surface checked university entrypoints as navigation hints, never proof."""
+    try:
+        seeds = json.loads(DIRECTORY_SEEDS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    query = normalized_text(direction)
+    hints: dict[str, list[dict[str, str]]] = {}
+    for row in seeds:
+        school = str(row.get("school") or "")
+        if school not in schools or not any(normalized_text(term) in query for term in row.get("direction_terms", [])):
+            continue
+        hints.setdefault(school, []).append({
+            "unit": str(row.get("unit") or ""),
+            "url": str(row.get("url") or ""),
+            "checked_on": str(row.get("checked_on") or ""),
+            "scope": "official navigation seed; re-fetch the live faculty page and verify each person's role",
+        })
+    return hints
 
 
 def parse_csv(value: str) -> list[str]:
@@ -938,16 +978,35 @@ def backfill_chinese_names(client: AMinerClient, candidates: list[Candidate], wa
         warnings.append(f"{unresolved} candidate(s) have no Chinese name in AMiner; shown by English name")
 
 
-def select_profile_portfolio(candidates: list[Candidate], limit: int) -> list[Candidate]:
-    """Keep cross-tier bands visible instead of letting reach candidates fill every row."""
+def select_profile_portfolio(candidates: list[Candidate], limit: int,
+                             named_schools: list[str] | None = None) -> list[Candidate]:
+    """Expose a strong lead from each named school before filling by fit band."""
     labels = ("冲刺（启发式）", "匹配（启发式）", "相对稳妥（启发式）")
     ratios = {labels[0]: 0.4, labels[1]: 0.4, labels[2]: 0.2}
     groups = {label: [row for row in candidates if row.recommendation_band == label] for label in labels}
     selected: list[Candidate] = []
     selected_ids: set[str] = set()
+    if named_schools:
+        requested = set(named_schools)
+        covered: set[str] = set()
+        # candidates are already sorted by quality. Each selected lead adds a
+        # school absent from the visible shortlist, when the pool has one.
+        for row in candidates:
+            new_schools = (row.source_schools & requested) - covered
+            if not new_schools:
+                continue
+            selected.append(row)
+            selected_ids.add(row.person_id)
+            covered.update(new_schools)
+            if len(selected) >= limit or covered == requested:
+                break
     for label in labels:
         quota = max(1, round(limit * ratios[label]))
         for row in groups[label][:quota]:
+            if len(selected) >= limit:
+                break
+            if row.person_id in selected_ids:
+                continue
             selected.append(row)
             selected_ids.add(row.person_id)
     for row in candidates:
@@ -1174,6 +1233,13 @@ def choose_profile_expansion_schools(
     return selected
 
 
+def should_auto_expand_profile(mode: str, explicit_schools: bool,
+                               no_auto_expand: bool, force_auto_expand: bool) -> bool:
+    """A named school set is a boundary unless expansion is explicitly requested."""
+    return (mode == "profile" and not no_auto_expand
+            and (force_auto_expand or not explicit_schools))
+
+
 def interest_matches_direction(interests: list[str], direction_terms: list[str]) -> bool:
     """Looser match for roster augmentation: a scholar's interest tag counts as
     on-direction if it shares enough salient word-stems with a direction term.
@@ -1289,7 +1355,7 @@ def recommend_for_school(
     if organization is None:
         warnings.append(f"organization not found in AMiner: {school}; try an official English name or discover mode")
         return {}
-    terms = direction_aliases(direction, aliases)[:3]
+    terms = school_search_terms(direction, aliases, profile)
     search_rows: dict[str, dict[str, Any]] = {}
     rows_by_term: list[list[dict[str, Any]]] = []
     for term in terms:
@@ -1593,7 +1659,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-cost", type=float, default=5.0)
     parser.add_argument("--yes", action="store_true", help="Allow a worst-case estimate above --max-cost")
-    parser.add_argument("--no-auto-expand-profile", action="store_true", help="Search only explicitly selected profile schools")
+    expansion = parser.add_mutually_exclusive_group()
+    expansion.add_argument("--no-auto-expand-profile", action="store_true",
+                           help="Search only the selected profile schools")
+    expansion.add_argument("--auto-expand-profile", action="store_true",
+                           help="Explicitly add evidence-backed schools beyond named profile targets")
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -2198,7 +2268,10 @@ def main() -> None:
         tier_name = tier_name or next(iter(profile.get("school_tier_preferences") or []), "")
         if not schools and tier_name in tiers["tiers"]:
             schools = list(tiers["tiers"][tier_name]["schools"])
-    auto_expand_profile = args.mode == "profile" and not args.no_auto_expand_profile
+    explicit_schools = bool(args.school or args.schools or args.tier or
+                            (profile and profile.get("target_schools")))
+    auto_expand_profile = should_auto_expand_profile(
+        args.mode, explicit_schools, args.no_auto_expand_profile, args.auto_expand_profile)
     if args.mode != "discover" and not schools and not auto_expand_profile:
         raise SystemExit("provide --school, --schools, --tier, or target schools in the profile")
 
@@ -2317,7 +2390,9 @@ def main() -> None:
         if args.hired_since:
             pool, hire_screening = screen_recent_hires(all_ranked, args.hired_since)
         ranked = (
-            select_profile_portfolio(pool, args.candidate_limit)
+            select_profile_portfolio(
+                pool, args.candidate_limit,
+                schools if (args.schools or (profile and profile.get("target_schools"))) else None)
             if args.mode == "profile" else pool[: args.candidate_limit]
         )
         backfill_chinese_names(client, ranked, warnings)
@@ -2330,8 +2405,15 @@ def main() -> None:
             "Advisor role and current recruitment require official verification unless a role is explicitly returned.",
             "Reach/match/safer labels are heuristic bands, not admission probabilities.",
         ]
-        as_of_date = datetime.now(timezone.utc).date()
+        as_of_date = datetime.now(CHINA_TZ).date()
         if args.mode == "profile":
+            method_notes.append(
+                "The profile result is a paper-based lead pool, not a verified advisor list. "
+                "Use each candidate's returned affiliation unit to locate its official faculty directory; "
+                "check the requested degree role and a dated attributed paper, then run shortlist_gate "
+                "before naming anyone as a verified recommendation. Check one eligible person per named school "
+                "before a second person at any school."
+            )
             method_notes.append(
                 f"Application advice must be relative to {as_of_date.isoformat()}: "
                 "do not present a deadline or summer camp before this date as a future step. "
@@ -2360,6 +2442,17 @@ def main() -> None:
                 for school, org in organization_cache.items()
             },
             "candidate_counts_by_school": per_school,
+            "official_directory_hints": official_directory_hints(schools, args.direction)
+            if args.mode == "profile" else {},
+            "verification_next_action": (
+                "When official_directory_hints are present, scan those checked entrypoints first in one bounded "
+                "directory pass instead of guessing hostnames. They are navigation seeds, not current-role proof. "
+                "For other schools, inspect the returned institution and department for an official faculty directory; "
+                "send the first person with an official requested-degree role and an attributed dated paper "
+                "to shortlist_gate immediately. Do not substitute repeated broad paper searches or a person "
+                "deep-dive for that gate. Rotate to each remaining named school before adding more from one school."
+                if args.mode == "profile" else None
+            ),
             "school_selection": {"requested_count": requested_school_count, "searched_count": len(schools),
                                  "truncated": requested_school_count > args.max_schools,
                                  "auto_expanded": bool(auto_added_schools),

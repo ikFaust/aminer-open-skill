@@ -99,7 +99,7 @@ def teacher_links(page, base_url, root):
         path = urllib.parse.urlsplit(url).path
         if path.endswith(("/list.htm", "/list.html", "/list.php")):
             continue
-        profile_path = re.search(r"(?:/page\.(?:htm|html|php)$|/(?:person|people|teachers?|faculty|staff|szll)/)", path, re.I)
+        profile_path = re.search(r"(?:/page\.(?:htm|html|php)$|/(?:person|people|teachers?|faculty|staff|szll)/|/info/\d+/\d+\.htm$)", path, re.I)
         faculty_home = (urllib.parse.urlsplit(url).hostname or "").startswith("faculty.") and path.endswith("/main.htm")
         if not profile_path and not faculty_home:
             continue
@@ -108,8 +108,8 @@ def teacher_links(page, base_url, root):
     return links
 
 
-def faculty_navigation(page, base_url, root):
-    """Find bounded faculty-list navigation, not news articles mentioning teachers."""
+def faculty_navigation(page, base_url, root, unit_terms=()):
+    """Find faculty lists and directly linked institute sites at the same university."""
     seen = set()
     links = []
     for label, href in page.links:
@@ -118,14 +118,23 @@ def faculty_navigation(page, base_url, root):
         if not url or not same_university_domain(url, root) or url == base_url or url in seen:
             continue
         path = urllib.parse.urlsplit(url).path.casefold()
-        direct = label.casefold() in {"教师", "师资", "师资力量", "师资队伍", "师资中心",
+        direct = label.casefold() in {"教师", "师资", "在职教师", "教师队伍", "师资力量", "师资队伍", "师资中心",
                                        "教师简介", "教师名单", "教职工名单", "教职工名录",
                                        "导师简介", "博导简介", "硕导简介", "教授", "副教授",
-                                       "faculty", "teachers"}
+                                       "博导名单", "硕导名单", "faculty", "teachers"}
         category = label == "硕博导师" or label.endswith(("研究所", "研究院", "工程系"))
-        if not direct and not category:
+        unit_index = label in {"院部设置", "院系设置", "学院设置", "院系机构", "专业学院"}
+        target_unit = (bool(unit_terms) and len(label) <= 35
+                       and not re.search(r"(新闻|报告|论坛|通知|招聘|招生|会议|讲座|校友|研究生)", label)
+                       and any(term in label for term in unit_terms)
+                       and any(kind in label for kind in ("学院", "研究院", "研究所", "学部")))
+        # University college sites often link the actual institute's separate
+        # official subdomain as “研究所主页”; following that link is evidence-based
+        # navigation, unlike guessing hostnames or faculty URL paths.
+        institute_home = label.endswith(("研究所主页", "研究院主页", "研究中心主页"))
+        if not direct and not category and not institute_home and not unit_index and not target_unit:
             continue
-        if not direct and not re.search(r"/(?:szll|faculty|teachers?|staff|people|sz|ys)/", path):
+        if not direct and not institute_home and not unit_index and not target_unit and not re.search(r"/(?:szdw|szll|faculty|teachers?|staff|people|sz|ys)/", path):
             continue
         seen.add(url)
         links.append(url)
@@ -196,6 +205,19 @@ def paper_excerpt(text):
     return ""
 
 
+def personal_homepage_key(text):
+    """Use a person-specific homepage to join duplicate official bios safely."""
+    match = re.search(r"个人主页\s*[:：]?\s*(?:https?://)?"
+                      r"([a-z0-9.-]+\.edu\.cn/[a-z0-9_./~-]+)", text, re.I)
+    if not match:
+        return ""
+    key = match.group(1).lower().rstrip("/")
+    path = key.split("/", 1)[1]
+    if path in {"index.htm", "index.html", "main.htm", "home", "faculty", "person"}:
+        return ""
+    return key
+
+
 def inspect_person(item, terms):
     name, url = item
     try:
@@ -207,6 +229,7 @@ def inspect_person(item, terms):
     matched = [term for term in terms if term.casefold() in focus.casefold()]
     return {"name": name, "url": final_url, "matched_terms": matched,
             "match_scope": scope, "snippets": {term: research_excerpt(focus, term) for term in matched},
+            "personal_homepage_key": personal_homepage_key(text),
             "role_excerpt": next((research_excerpt(text, role) for role in ("博士生导师", "硕士生导师", "教授", "研究员")
                                   if role in text), ""),
             "master_supervisor_explicit": profile_role(text, name, "master"),
@@ -214,10 +237,47 @@ def inspect_person(item, terms):
             "paper_excerpt": paper_excerpt(text)}
 
 
-def scan(url, terms, max_profiles=150, max_results=25, degree=None):
+def scan(url, terms, max_profiles=150, max_results=25, degree=None, unit_terms=()):
     if not url.startswith(("http://", "https://")):
         raise ValueError("Faculty directory URL must use HTTP(S)")
-    final_url, page = fetch(url)
+    fallback_from = ""
+    http_retry_from = ""
+    parsed_url = urllib.parse.urlsplit(url)
+    host = parsed_url.hostname or ""
+    domain = university_domain(host)
+    college_host = domain.endswith(".edu.cn") and host not in {domain, "www." + domain}
+    first_error = None
+    try:
+        final_url, page = fetch(url)
+    except Exception as exc:
+        first_error = exc
+        final_url, page = "", None
+    redirected_to_root = bool(page and college_host and
+                              (urllib.parse.urlsplit(final_url).hostname or "") in {domain, "www." + domain}
+                              and urllib.parse.urlsplit(final_url).path in {"", "/"})
+    if parsed_url.scheme == "https" and college_host and (page is None or redirected_to_root):
+        http_url = urllib.parse.urlunsplit(("http", parsed_url.netloc, parsed_url.path,
+                                           parsed_url.query, parsed_url.fragment))
+        try:
+            alternate_url, alternate_page = fetch(http_url)
+            if (same_university_domain(alternate_url, url) and
+                    not ((urllib.parse.urlsplit(alternate_url).hostname or "") in {domain, "www." + domain}
+                         and urllib.parse.urlsplit(alternate_url).path in {"", "/"})):
+                final_url, page = alternate_url, alternate_page
+                http_retry_from = url
+        except Exception:
+            pass
+    if page is None:
+        if not college_host:
+            raise first_error or ValueError("official university page could not be fetched")
+        # A guessed or temporarily unavailable college host must not make the
+        # whole university look unreachable. Follow the university's real
+        # unit index from its official root instead.
+        root_url = "https://www." + domain + "/"
+        final_url, page = fetch(root_url)
+        fallback_from = url
+    elif redirected_to_root and not http_retry_from:
+        fallback_from = url
     queue = [(final_url, page, 0)]
     visited = set()
     links = []
@@ -226,6 +286,8 @@ def scan(url, terms, max_profiles=150, max_results=25, degree=None):
     best_count = 0
     directory_pages = []
     navigation_errors = []
+    unit_directory_links = []
+    seen_unit_links = set()
     while queue and len(visited) < 26:
         page_url, current_page, depth = queue.pop(0)
         if page_url in visited:
@@ -233,15 +295,24 @@ def scan(url, terms, max_profiles=150, max_results=25, degree=None):
         visited.add(page_url)
         directory_pages.append(page_url)
         page_links = teacher_links(current_page, page_url, url)
+        for label, href in current_page.links:
+            unit_url = public_link(page_url, href)
+            if (unit_url and same_university_domain(unit_url, url)
+                    and len(label) <= 35
+                    and any(kind in label for kind in ("学院", "研究院", "研究所", "学部"))
+                    and not re.search(r"(新闻|报告|论坛|通知|招聘|招生|会议|讲座|校友)", label)
+                    and unit_url not in seen_unit_links):
+                seen_unit_links.add(unit_url)
+                unit_directory_links.append({"label": label, "url": unit_url})
         if len(page_links) > best_count:
             best_source, best_count = page_url, len(page_links)
         for item in page_links:
             if item[1] not in seen_profiles:
                 seen_profiles.add(item[1])
                 links.append(item)
-        child_urls = faculty_pagination(current_page, page_url, url) if depth < 3 else []
-        if depth < 2:
-            child_urls = faculty_navigation(current_page, page_url, url) + child_urls
+        child_urls = faculty_pagination(current_page, page_url, url) if depth < 4 else []
+        if depth < 4:
+            child_urls = faculty_navigation(current_page, page_url, url, unit_terms) + child_urls
         for child_url in child_urls:
             if child_url in visited or any(child_url == queued[0] for queued in queue):
                 continue
@@ -265,26 +336,51 @@ def scan(url, terms, max_profiles=150, max_results=25, degree=None):
                                   row["match_scope"] != "research_section", -len(row["matched_terms"]), row["name"]))
     official_role_paper_leads = []
     official_role_without_dated_paper = []
+    official_split_evidence_leads = []
     seen_ready_names = set()
     if role_field:
+        by_identity = {}
+        for row in rows:
+            if row.get("personal_homepage_key"):
+                by_identity.setdefault((row["name"], row["personal_homepage_key"]), []).append(row)
+        for (name, homepage), bios in by_identity.items():
+            if len(bios) < 2 or not any(bio.get("matched_terms") for bio in bios):
+                continue
+            role_bio = next((bio for bio in bios if bio.get(role_field)), None)
+            paper_bio = next((bio for bio in bios if bio.get("paper_excerpt") and
+                              bio["url"] != (role_bio or {}).get("url")), None)
+            if role_bio and paper_bio:
+                official_split_evidence_leads.append({
+                    "name": name, "personal_homepage_key": homepage,
+                    "official_profile_url": paper_bio["url"],
+                    "official_supervisor_url": role_bio["url"],
+                    "paper_excerpt": paper_bio["paper_excerpt"],
+                    "matched_terms": list(dict.fromkeys(role_bio.get("matched_terms", []) +
+                                                        paper_bio.get("matched_terms", []))),
+                })
         for row in matches:
             if row.get(role_field) and row.get("paper_excerpt") and row["name"] not in seen_ready_names:
                 seen_ready_names.add(row["name"])
                 official_role_paper_leads.append(row)
             elif row.get(role_field) and not row.get("paper_excerpt"):
                 official_role_without_dated_paper.append(row)
-    return {"source": best_source, "directory_pages": directory_pages,
+    return {"source": best_source, "fallback_from": fallback_from,
+            "http_retry_from": http_retry_from,
+            "directory_pages": directory_pages,
+            "unit_directory_links": unit_directory_links[:60],
             "navigation_errors": navigation_errors[:10], "terms": terms, "links_found": links_found,
             "profiles_scanned": len(rows), "unscanned_links": links_found - len(rows),
             "unvisited_directory_pages": len(queue),
             "official_role_paper_leads": official_role_paper_leads[:max_results],
             "official_role_without_dated_paper": official_role_without_dated_paper[:max_results],
+            "official_split_evidence_leads": official_split_evidence_leads[:max_results],
+            "omitted_official_split_evidence_leads": max(0, len(official_split_evidence_leads) - max_results),
             "omitted_official_role_paper_leads": max(0, len(official_role_paper_leads) - max_results),
             "omitted_official_role_without_dated_paper": max(0, len(official_role_without_dated_paper) - max_results),
             "matches_found": len(matches), "matches": matches[:max_results],
             "omitted_matches": max(0, len(matches) - max_results), "roster": roster,
             "errors": errors[:10],
-            "note": "official_role_paper_leads have an explicit degree role and dated paper excerpt; official_role_without_dated_paper have the role but need a targeted paper check. Neither group is certified until shortlist_gate. Roster lists all discovered faculty links; absence from matches does not mean absence from the roster or unscanned."}
+            "note": "official_split_evidence_leads join separate official bios only when they share an exact name and person-specific homepage; pass the paper page and role page separately to shortlist_gate. All lead groups still need the gate and topic review. Roster lists all discovered faculty links; absence from matches does not mean absence from the roster or unscanned."}
 
 
 def main():
@@ -294,13 +390,16 @@ def main():
     parser.add_argument("--max-profiles", type=int, default=150)
     parser.add_argument("--max-results", type=int, default=25)
     parser.add_argument("--degree", choices=("master", "doctor"), help="Prioritize profiles explicitly stating this degree-supervisor role")
+    parser.add_argument("--unit-terms", default="",
+                        help="When starting at a university homepage, follow official college links matching these comma-separated names")
     args = parser.parse_args()
     if not (1 <= args.max_profiles <= 150 and 1 <= args.max_results <= 50):
         parser.error("max-profiles must be 1–150 and max-results 1–50")
     terms = list(dict.fromkeys(x.strip() for x in args.terms.split(",") if x.strip()))
+    unit_terms = list(dict.fromkeys(x.strip() for x in args.unit_terms.split(",") if x.strip()))
     if not terms:
         parser.error("at least one term is required")
-    print(json.dumps(scan(args.url, terms, args.max_profiles, args.max_results, args.degree), ensure_ascii=False,
+    print(json.dumps(scan(args.url, terms, args.max_profiles, args.max_results, args.degree, unit_terms), ensure_ascii=False,
                      separators=(",", ":")))
 
 

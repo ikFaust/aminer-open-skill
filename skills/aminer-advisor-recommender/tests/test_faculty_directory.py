@@ -28,6 +28,154 @@ class FacultyDirectoryTests(unittest.TestCase):
                          [('王志', 'https://ceo.nankai.edu.cn/szll/xdgxyjs/wz.htm')])
         self.assertIsNone(directory.public_link(root, ' javascript:void(0)'))
 
+    def test_college_link_to_institute_home_reaches_current_faculty_roster(self):
+        college = directory.Page()
+        college.feed('<a href="https://imo.nankai.edu.cn/">现代光学研究所主页</a>')
+        institute = directory.Page()
+        institute.feed('<a href="/sz/zzjs.htm">在职教师</a>')
+        roster = directory.Page()
+        roster.feed('<a href="https://ceo.nankai.edu.cn/szll/xdgxyjs/lb.htm">刘波</a>')
+        profile = directory.Page()
+        profile.feed('刘波 教授，博士生导师。研究方向：现代光通信和光电子技术。')
+        pages = {
+            'https://ceo.nankai.edu.cn/': college,
+            'https://imo.nankai.edu.cn/': institute,
+            'https://imo.nankai.edu.cn/sz/zzjs.htm': roster,
+            'https://ceo.nankai.edu.cn/szll/xdgxyjs/lb.htm': profile,
+        }
+        with patch.object(directory, 'fetch', side_effect=lambda url: (url, pages[url])):
+            result = directory.scan('https://ceo.nankai.edu.cn/', ['光通信'], degree='doctor')
+        self.assertEqual(result['roster'], [
+            {'name': '刘波', 'url': 'https://ceo.nankai.edu.cn/szll/xdgxyjs/lb.htm'}])
+        self.assertIn('https://imo.nankai.edu.cn/sz/zzjs.htm', result['directory_pages'])
+        self.assertEqual(result['matches'][0]['name'], '刘波')
+
+    def test_university_professional_colleges_link_reaches_institute_roster(self):
+        home = directory.Page()
+        home.feed('<a href="/213/list.htm">专业学院</a>')
+        units = directory.Page()
+        units.feed('<a href="https://ceo.nankai.edu.cn/">电子信息与光学工程学院</a>')
+        college = directory.Page()
+        college.feed('<a href="https://imo.nankai.edu.cn/">现代光学研究所主页</a>')
+        institute = directory.Page()
+        institute.feed('<a href="/sz/zzjs.htm">在职教师</a>')
+        roster = directory.Page()
+        roster.feed('<a href="https://ceo.nankai.edu.cn/szll/xdgxyjs/lb.htm">刘波</a>')
+        profile = directory.Page()
+        profile.feed('刘波 研究方向：现代光通信和光电子技术。教授，博士生导师。')
+        pages = {'https://www.nankai.edu.cn/': home,
+                 'https://www.nankai.edu.cn/213/list.htm': units,
+                 'https://ceo.nankai.edu.cn/': college,
+                 'https://imo.nankai.edu.cn/': institute,
+                 'https://imo.nankai.edu.cn/sz/zzjs.htm': roster,
+                 'https://ceo.nankai.edu.cn/szll/xdgxyjs/lb.htm': profile}
+        with patch.object(directory, 'fetch', side_effect=lambda url: (url, pages[url])):
+            result = directory.scan('https://www.nankai.edu.cn/', ['光通信'],
+                                    degree='doctor', unit_terms=['光学'])
+        self.assertEqual([row['name'] for row in result['roster']], ['刘波'])
+        self.assertIn('https://imo.nankai.edu.cn/sz/zzjs.htm', result['directory_pages'])
+
+    def test_teacher_team_institute_and_info_profile_are_followed(self):
+        home = directory.Page()
+        home.feed('<a href="/szdw/jsdw1/ayjscz/kzyjcyjs.htm">教师队伍</a>')
+        team = directory.Page()
+        team.feed('<a href="/szdw/jsdw1/ayjscz/xxclyjs.htm">信息处理研究所</a>'
+                  '<a href="/info/1062/4282.htm">热烈祝贺刘云浩教授当选院士</a>')
+        institute = directory.Page()
+        institute.feed('<a href="/info/1077/2329.htm">鲁继文</a>')
+        profile = directory.Page()
+        profile.feed('鲁继文 教授、博士生导师。研究方向：机器视觉感知、点云表征。'
+                     '代表作 Point-BERT: Pre-training 3D Point Cloud Transformers (2022)。')
+        root = 'https://www.au.tsinghua.edu.cn'
+        pages = {root + '/': home,
+                 root + '/szdw/jsdw1/ayjscz/kzyjcyjs.htm': team,
+                 root + '/szdw/jsdw1/ayjscz/xxclyjs.htm': institute,
+                 root + '/info/1077/2329.htm': profile}
+        with patch.object(directory, 'fetch', side_effect=lambda url: (url, pages[url])):
+            result = directory.scan(root + '/', ['点云'], degree='doctor')
+        self.assertEqual([row['name'] for row in result['roster']], ['鲁继文'])
+        self.assertEqual(result['official_role_paper_leads'][0]['name'], '鲁继文')
+
+    def test_university_unit_index_can_reach_selected_college_directory(self):
+        home = directory.Page()
+        home.feed('<a href="/branch/ybsz.jsp">院部设置</a>')
+        units = directory.Page()
+        units.feed('<a href="https://scst.suda.edu.cn/">计算机科学与技术学院 软件学院</a>'
+                   '<a href="https://med.suda.edu.cn/">医学部</a>'
+                   '<a href="/news/meeting.htm">计算机科学与技术学院学术报告：最新研究成果</a>')
+        college = directory.Page()
+        college.feed('<a href="/teachers/list.htm">师资队伍</a>')
+        listing = directory.Page()
+        listing.feed('<a href="/cao/page.htm">曹敏</a>')
+        profile = directory.Page()
+        profile.feed('曹敏 研究方向：图文检索。硕士生导师。')
+        pages = {
+            'https://www.suda.edu.cn/': home,
+            'https://www.suda.edu.cn/branch/ybsz.jsp': units,
+            'https://scst.suda.edu.cn/': college,
+            'https://scst.suda.edu.cn/teachers/list.htm': listing,
+            'https://scst.suda.edu.cn/cao/page.htm': profile,
+        }
+        with patch.object(directory, 'fetch', side_effect=lambda url: (url, pages[url])):
+            result = directory.scan('https://www.suda.edu.cn/', ['图文检索'],
+                                    degree='master', unit_terms=['计算机'])
+        self.assertEqual([row['name'] for row in result['roster']], ['曹敏'])
+        self.assertIn({'label': '计算机科学与技术学院 软件学院', 'url': 'https://scst.suda.edu.cn/'},
+                      result['unit_directory_links'])
+        self.assertNotIn('https://med.suda.edu.cn/', result['directory_pages'])
+
+    def test_unavailable_college_host_falls_back_to_official_university_root(self):
+        home = directory.Page()
+        home.feed('<a href="/branch/ybsz.jsp">院部设置</a>')
+        units = directory.Page()
+        units.feed('<a href="https://scst.suda.edu.cn/">计算机科学与技术学院</a>')
+        college = directory.Page()
+        college.feed('<a href="/teachers/list.htm">师资队伍</a>')
+        listing = directory.Page()
+        listing.feed('<a href="/cao/page.htm">曹敏</a>')
+        profile = directory.Page()
+        profile.feed('曹敏 硕士生导师。研究方向：图文检索。')
+        pages = {'https://www.suda.edu.cn/': home,
+                 'https://www.suda.edu.cn/branch/ybsz.jsp': units,
+                 'https://scst.suda.edu.cn/': college,
+                 'https://scst.suda.edu.cn/teachers/list.htm': listing,
+                 'https://scst.suda.edu.cn/cao/page.htm': profile}
+
+        def fake_fetch(url):
+            if url == 'https://cst.suda.edu.cn':
+                raise OSError('unavailable guessed college host')
+            return url, pages[url]
+
+        with patch.object(directory, 'fetch', side_effect=fake_fetch):
+            result = directory.scan('https://cst.suda.edu.cn', ['图文检索'],
+                                    degree='master', unit_terms=['计算机'])
+        self.assertEqual(result['fallback_from'], 'https://cst.suda.edu.cn')
+        self.assertEqual([row['name'] for row in result['roster']], ['曹敏'])
+
+    def test_https_college_redirect_to_generic_root_retries_same_host_http(self):
+        root = directory.Page()
+        root.feed('浙江大学 首页')
+        college = directory.Page()
+        college.feed('<a href="/faculty/list.htm">师资队伍</a>')
+        teachers = directory.Page()
+        teachers.feed('<a href="/teacher/liu.htm">刘勇</a>')
+        profile = directory.Page()
+        profile.feed('刘勇 教授、博士生导师。研究方向：机器人感知与 SLAM。')
+        pages = {
+            'https://www.cse.zju.edu.cn/': ('https://www.zju.edu.cn/', root),
+            'http://www.cse.zju.edu.cn/': ('http://www.cse.zju.edu.cn/', college),
+            'http://www.cse.zju.edu.cn/faculty/list.htm':
+                ('http://www.cse.zju.edu.cn/faculty/list.htm', teachers),
+            'http://www.cse.zju.edu.cn/teacher/liu.htm':
+                ('http://www.cse.zju.edu.cn/teacher/liu.htm', profile),
+        }
+        with patch.object(directory, 'fetch', side_effect=lambda url: pages[url]):
+            result = directory.scan('https://www.cse.zju.edu.cn/', ['SLAM'], degree='doctor')
+        self.assertEqual(result['http_retry_from'], 'https://www.cse.zju.edu.cn/')
+        self.assertEqual(result['fallback_from'], '')
+        self.assertIn('http://www.cse.zju.edu.cn/faculty/list.htm', result['directory_pages'])
+        self.assertEqual([row['name'] for row in result['roster']], ['刘勇'])
+
     def test_follows_teacher_listing_and_keeps_exact_page_urls(self):
         landing = directory.Page()
         landing.feed('<a href="/teachers/list.htm">- 教师</a>')
@@ -161,6 +309,42 @@ class FacultyDirectoryTests(unittest.TestCase):
         self.assertIn('Vision Detection, 2023', result['matches'][0]['paper_excerpt'])
         self.assertFalse(result['matches'][1]['master_supervisor_explicit'])
         self.assertEqual([x['name'] for x in result['official_role_paper_leads']], ['丙丁'])
+
+    def test_same_person_split_role_and_paper_pages_are_joined_by_homepage(self):
+        listing = directory.Page()
+        listing.feed('<a href="/old/page.htm">曹敏</a><a href="/new/page.htm">曹敏</a>')
+        old = directory.Page()
+        old.feed('曹敏 讲师 硕士生导师 研究方向：多模态学习。个人主页：http://web.suda.edu.cn/caomin/')
+        new = directory.Page()
+        new.feed('曹敏 副教授 研究方向：视觉-语言多模态学习。个人主页：web.suda.edu.cn/caomin/ '
+                 '代表作 Vision-Grounded Text-Based Person Retrieval, 2026.')
+        pages = {'https://scst.suda.edu.cn/list.htm': listing,
+                 'https://scst.suda.edu.cn/old/page.htm': old,
+                 'https://scst.suda.edu.cn/new/page.htm': new}
+        with patch.object(directory, 'fetch', side_effect=lambda url: (url, pages[url])):
+            result = directory.scan('https://scst.suda.edu.cn/list.htm', ['多模态'], degree='master')
+        self.assertEqual(result['official_split_evidence_leads'], [{
+            'name': '曹敏', 'personal_homepage_key': 'web.suda.edu.cn/caomin',
+            'official_profile_url': 'https://scst.suda.edu.cn/new/page.htm',
+            'official_supervisor_url': 'https://scst.suda.edu.cn/old/page.htm',
+            'paper_excerpt': '代表作 Vision-Grounded Text-Based Person Retrieval, 2026.',
+            'matched_terms': ['多模态'],
+        }])
+
+    def test_same_name_different_homepages_are_not_joined(self):
+        listing = directory.Page()
+        listing.feed('<a href="/old/page.htm">曹敏</a><a href="/new/page.htm">曹敏</a>')
+        old = directory.Page()
+        old.feed('曹敏 硕士生导师 研究方向：多模态。个人主页：http://web.suda.edu.cn/caomin/')
+        other = directory.Page()
+        other.feed('曹敏 研究方向：多模态。个人主页：http://web.suda.edu.cn/othercao/ '
+                   '代表作 Text-Based Person Retrieval, 2026.')
+        pages = {'https://scst.suda.edu.cn/list.htm': listing,
+                 'https://scst.suda.edu.cn/old/page.htm': old,
+                 'https://scst.suda.edu.cn/new/page.htm': other}
+        with patch.object(directory, 'fetch', side_effect=lambda url: (url, pages[url])):
+            result = directory.scan('https://scst.suda.edu.cn/list.htm', ['多模态'], degree='master')
+        self.assertEqual(result['official_split_evidence_leads'], [])
 
     def test_role_with_exact_topic_but_undated_paper_is_kept_for_followup(self):
         listing = directory.Page()
