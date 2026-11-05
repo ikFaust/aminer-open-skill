@@ -91,9 +91,14 @@ class RecommendationLogicTests(unittest.TestCase):
         self.assertTrue(timing["entrance_exam_near"])
         self.assertIn("不足两个月", " ".join(timing["notes"]))
 
-    def test_doctoral_profile_has_no_national_master_exam_timing(self):
-        self.assertIsNone(application_timing(date(2026, 11, 4),
-                                             {"target_degree": "phd", "target_cycle": 2027}))
+    def test_doctoral_profile_requires_current_official_deadline_without_master_exam_timing(self):
+        timing = application_timing(date(2026, 11, 4),
+                                    {"target_degree": "phd", "target_cycle": 2027})
+        self.assertEqual(timing["degree"], "doctor")
+        self.assertTrue(timing["official_deadline_required"])
+        self.assertFalse(timing["national_exam_route_only"])
+        self.assertIn("2026-11-04", " ".join(timing["notes"]))
+        self.assertNotIn("summer_camp_window_passed", timing)
 
     def test_compound_org_resolves_parent_and_uses_school_id(self):
         client = ScriptedClient({

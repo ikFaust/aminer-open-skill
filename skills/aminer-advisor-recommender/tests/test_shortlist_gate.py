@@ -1,6 +1,10 @@
 import importlib.util
+import json
+import os
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -57,6 +61,22 @@ class EnglishUniversityClient(FakeClient):
 
 
 class ShortlistGateTest(unittest.TestCase):
+    def test_utf8_candidates_file_cli_reaches_fail_closed_gate(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "candidates.json"
+            source.write_text(json.dumps([{"name": "张栋", "school_domain": "suda.edu.cn"}],
+                                         ensure_ascii=False), encoding="utf-8")
+            env = dict(os.environ)
+            env.pop("AMINER_API_KEY", None)
+            proc = subprocess.run([sys.executable, str(SCRIPTS / "shortlist_gate.py"),
+                                   "--candidates-file", str(source), "--degree", "master",
+                                   "--allowed-domains", "suda.edu.cn"],
+                                  capture_output=True, text=True, env=env, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        output = json.loads(proc.stdout)
+        self.assertEqual(output["approved"], [])
+        self.assertEqual(output["leads"][0]["name"], "张栋")
+
     def test_wrong_chinese_name_and_missing_official_program_are_blocked(self):
         row = {"name": "刘智", "school_domain": "shu.edu.cn", "person_id": "p1",
                "official_profile_url": "https://ee.shu.edu.cn/liu", "school_names": ["Shanghai University"],

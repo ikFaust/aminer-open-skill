@@ -250,12 +250,18 @@ def verify_candidate(row: dict, program_terms: list[str], degree: str,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--candidates-json", required=True, help="JSON array of proposed main-list rows")
+    candidate_source = parser.add_mutually_exclusive_group(required=True)
+    candidate_source.add_argument("--candidates-json", help="JSON array of proposed main-list rows")
+    candidate_source.add_argument("--candidates-file", help="UTF-8 JSON file containing proposed main-list rows")
     parser.add_argument("--program-terms", default="", help="Exact official program names, only when the user specified a program or college")
     parser.add_argument("--allowed-domains", required=True, help="Comma-separated edu.cn domains of the requested schools")
     parser.add_argument("--degree", choices=("master", "doctor"), required=True)
     args = parser.parse_args()
-    candidates = json.loads(args.candidates_json)
+    if args.candidates_file:
+        with open(args.candidates_file, encoding="utf-8") as source:
+            candidates = json.load(source)
+    else:
+        candidates = json.loads(args.candidates_json)
     if not isinstance(candidates, list) or not candidates or not all(isinstance(c, dict) for c in candidates):
         parser.error("--candidates-json must be a nonempty JSON array of objects")
     terms = [s.strip() for s in args.program_terms.split(",") if s.strip()]

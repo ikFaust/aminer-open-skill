@@ -2092,8 +2092,11 @@ def deepdive_person(
 
 
 def application_timing(as_of_date: date, profile: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Give bounded, cycle-specific timing for the national master's exam route."""
-    if not profile or str(profile.get("target_degree") or "").lower() not in {"master", "硕士"}:
+    """Give cycle-specific cautions without inventing program deadlines."""
+    if not profile:
+        return None
+    degree = str(profile.get("target_degree") or "").lower()
+    if degree not in {"master", "硕士", "phd", "doctor", "博士"}:
         return None
     try:
         cycle = int(profile.get("target_cycle"))
@@ -2101,6 +2104,14 @@ def application_timing(as_of_date: date, profile: dict[str, Any] | None) -> dict
         return None
     if not as_of_date.year <= cycle <= as_of_date.year + 3:
         return None
+    if degree in {"phd", "doctor", "博士"}:
+        return {"target_cycle": cycle, "as_of_date": as_of_date.isoformat(),
+                "degree": "doctor", "official_deadline_required": True,
+                "national_exam_route_only": False,
+                "notes": [
+                    "博士申请考核的报名和联系导师时间因学校、院系与批次而异；必须查目标院系当年的官方招生通知。",
+                    f"只建议在 {as_of_date.isoformat()} 当天仍可执行的下一步；过去的套磁、实习或报名月份不得写成未来计划。",
+                ]}
     exam_year = cycle - 1
     camp_passed = as_of_date > date(exam_year, 8, 31)
     registration_passed = as_of_date > date(exam_year, 10, 31)
