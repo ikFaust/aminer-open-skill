@@ -1,5 +1,8 @@
+import io
+import json
 import sys
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,6 +11,52 @@ import faculty_directory as directory  # noqa: E402
 
 
 class FacultyDirectoryTests(unittest.TestCase):
+    def test_same_host_dynamic_teacher_roster_exposes_official_people(self):
+        listing = directory.Page()
+        listing.raw_html = '''$.ajax({url: 'https://sais.sjtu.edu.cn/active/ajax_teacher_list.html',
+            data: {cat_id:'18',cat_code:'faculty',type:global_type}});'''
+        content = '<a href="https://sais.sjtu.edu.cn/faculty/1611.html">白婷</a>'
+        payload = io.BytesIO(json.dumps({"content": content}).encode())
+        with patch.object(directory.urllib.request, 'urlopen', return_value=payload) as call:
+            endpoint, roster = directory.dynamic_teacher_page(
+                listing, 'https://sais.sjtu.edu.cn/faculty.html')
+        self.assertEqual(endpoint, 'https://sais.sjtu.edu.cn/active/ajax_teacher_list.html')
+        self.assertIn(b'cat_id=18', call.call_args.args[0].data)
+        self.assertEqual(directory.teacher_links(roster, endpoint, endpoint),
+                         [('白婷', 'https://sais.sjtu.edu.cn/faculty/1611.html')])
+
+    def test_dynamic_teacher_endpoint_must_stay_on_directory_host(self):
+        listing = directory.Page()
+        listing.raw_html = '''$.ajax({url:'https://other.edu.cn/active/ajax_teacher_list.html',
+            data:{cat_id:'18',cat_code:'faculty'}});'''
+        with patch.object(directory.urllib.request, 'urlopen') as call:
+            with self.assertRaisesRegex(ValueError, 'official directory host'):
+                directory.dynamic_teacher_page(listing, 'https://sais.sjtu.edu.cn/faculty.html')
+        call.assert_not_called()
+
+    def test_dynamic_computer_science_teacher_links_use_jiaoshiml_path(self):
+        roster = directory.Page()
+        roster.feed('<a href="https://www.cs.sjtu.edu.cn/jiaoshiml/zangbinyu.html">臧斌宇</a>')
+        root = 'https://www.cs.sjtu.edu.cn/jiaoshiml.html'
+        self.assertEqual(directory.teacher_links(roster, root, root),
+                         [('臧斌宇', 'https://www.cs.sjtu.edu.cn/jiaoshiml/zangbinyu.html')])
+
+    def test_degree_cli_keeps_roster_count_without_flooding_output(self):
+        found = {'roster': [{'name': f'人{i}', 'url': f'https://school.edu.cn/faculty/{i}.html'}
+                            for i in range(15)], 'unit_directory_links': [], 'note': 'test'}
+        out = io.StringIO()
+        argv = ['faculty_directory.py', '--url', 'https://school.edu.cn/faculty.html',
+                '--terms', '机器人', '--degree', 'doctor']
+        with (patch.object(sys, 'argv', argv),
+              patch.object(directory, 'scan', return_value=found),
+              redirect_stdout(out)):
+            directory.main()
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload['roster_count'], 15)
+        self.assertEqual(len(payload['roster_sample']), 10)
+        self.assertEqual(payload['omitted_roster'], 5)
+        self.assertNotIn('roster', payload)
+
     def test_navigation_keyword_is_not_research_evidence(self):
         profile = directory.Page()
         profile.feed('信息与通信工程系 研究方向：工业控制系统安全 个人简介 光纤实验室友情链接')

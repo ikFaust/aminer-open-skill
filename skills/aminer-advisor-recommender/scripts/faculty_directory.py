@@ -18,6 +18,7 @@ class Page(HTMLParser):
         self.href = None
         self.label = []
         self.skip = 0
+        self.raw_html = ""
 
     def handle_starttag(self, tag, attrs):
         if tag in ("script", "style"):
@@ -49,8 +50,39 @@ def fetch(url):
         charset = response.headers.get_content_charset() or "utf-8"
         body = response.read(300000).decode(charset, "replace")
         page = Page()
+        page.raw_html = body
         page.feed(body)
         return response.url, page
+
+
+def dynamic_teacher_page(page, page_url):
+    """Read a same-host teacher roster loaded by the official page's AJAX code."""
+    html = page.raw_html
+    endpoint_match = re.search(r"url\s*:\s*['\"](https?://[^'\"]+/active/ajax_teacher_list\.html)['\"]", html)
+    cat_id = re.search(r"cat_id\s*:\s*['\"](\d+)['\"]", html)
+    cat_code = re.search(r"cat_code\s*:\s*['\"]([a-zA-Z0-9_-]+)['\"]", html)
+    if not (endpoint_match and cat_id and cat_code):
+        return None
+    endpoint = endpoint_match.group(1)
+    source = urllib.parse.urlsplit(page_url)
+    target = urllib.parse.urlsplit(endpoint)
+    if (target.hostname != source.hostname or not target.hostname or
+            not target.hostname.endswith(".edu.cn") or target.path != "/active/ajax_teacher_list.html"):
+        raise ValueError("dynamic teacher endpoint is not on the official directory host")
+    params = urllib.parse.urlencode({
+        "page": 1, "cat_id": cat_id.group(1), "cat_code": cat_code.group(1),
+        "type": 1, "zm": "All", "zc": "全部", "search": "",
+    }).encode()
+    request = urllib.request.Request(endpoint, data=params,
+                                     headers={"User-Agent": "Mozilla/5.0", "Referer": page_url})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        data = json.loads(response.read(1000000).decode("utf-8", "replace"))
+    content = data.get("content") if isinstance(data, dict) else None
+    if not isinstance(content, str):
+        raise ValueError("dynamic teacher endpoint returned no HTML content")
+    roster = Page()
+    roster.feed(content)
+    return endpoint, roster
 
 
 def university_domain(host):
@@ -99,7 +131,7 @@ def teacher_links(page, base_url, root):
         path = urllib.parse.urlsplit(url).path
         if path.endswith(("/list.htm", "/list.html", "/list.php")):
             continue
-        profile_path = re.search(r"(?:/page\.(?:htm|html|php)$|/(?:person|people|teachers?|faculty|staff|szll)/|/info/\d+/\d+\.htm$)", path, re.I)
+        profile_path = re.search(r"(?:/page\.(?:htm|html|php)$|/(?:person|people|teachers?|faculty|staff|szll|jiaoshiml)/|/info/\d+/\d+\.htm$)", path, re.I)
         faculty_home = (urllib.parse.urlsplit(url).hostname or "").startswith("faculty.") and path.endswith("/main.htm")
         if not profile_path and not faculty_home:
             continue
@@ -286,6 +318,7 @@ def scan(url, terms, max_profiles=150, max_results=25, degree=None, unit_terms=(
     best_count = 0
     directory_pages = []
     navigation_errors = []
+    dynamic_roster_sources = []
     unit_directory_links = []
     seen_unit_links = set()
     while queue and len(visited) < 26:
@@ -295,6 +328,16 @@ def scan(url, terms, max_profiles=150, max_results=25, degree=None, unit_terms=(
         visited.add(page_url)
         directory_pages.append(page_url)
         page_links = teacher_links(current_page, page_url, url)
+        try:
+            dynamic = dynamic_teacher_page(current_page, page_url)
+            if dynamic:
+                endpoint, roster_page = dynamic
+                dynamic_links = teacher_links(roster_page, page_url, url)
+                page_links.extend(dynamic_links)
+                dynamic_roster_sources.append({"endpoint": endpoint, "links_found": len(dynamic_links)})
+        except Exception as exc:
+            navigation_errors.append({"url": page_url, "error": "dynamic roster: " + type(exc).__name__
+                                      + ": " + str(exc)[:120]})
         for label, href in current_page.links:
             unit_url = public_link(page_url, href)
             if (unit_url and same_university_domain(unit_url, url)
@@ -367,6 +410,7 @@ def scan(url, terms, max_profiles=150, max_results=25, degree=None, unit_terms=(
     return {"source": best_source, "fallback_from": fallback_from,
             "http_retry_from": http_retry_from,
             "directory_pages": directory_pages,
+            "dynamic_roster_sources": dynamic_roster_sources,
             "unit_directory_links": unit_directory_links[:60],
             "navigation_errors": navigation_errors[:10], "terms": terms, "links_found": links_found,
             "profiles_scanned": len(rows), "unscanned_links": links_found - len(rows),
@@ -380,7 +424,7 @@ def scan(url, terms, max_profiles=150, max_results=25, degree=None, unit_terms=(
             "matches_found": len(matches), "matches": matches[:max_results],
             "omitted_matches": max(0, len(matches) - max_results), "roster": roster,
             "errors": errors[:10],
-            "note": "official_split_evidence_leads join separate official bios only when they share an exact name and person-specific homepage; pass the paper page and role page separately to shortlist_gate. All lead groups still need the gate and topic review. Roster lists all discovered faculty links; absence from matches does not mean absence from the roster or unscanned."}
+            "note": "official_split_evidence_leads join separate official bios only when they share an exact name and person-specific homepage; pass the paper page and role page separately to shortlist_gate. All lead groups still need the gate and topic review. The in-memory roster lists all discovered faculty links; absence from matches does not mean absence from the roster or unscanned."}
 
 
 def main():
@@ -390,6 +434,8 @@ def main():
     parser.add_argument("--max-profiles", type=int, default=150)
     parser.add_argument("--max-results", type=int, default=25)
     parser.add_argument("--degree", choices=("master", "doctor"), help="Prioritize profiles explicitly stating this degree-supervisor role")
+    parser.add_argument("--full-roster", action="store_true",
+                        help="Include every discovered teacher link; degree-specific searches return a compact roster sample by default")
     parser.add_argument("--unit-terms", default="",
                         help="When starting at a university homepage, follow official college links matching these comma-separated names")
     args = parser.parse_args()
@@ -399,8 +445,15 @@ def main():
     unit_terms = list(dict.fromkeys(x.strip() for x in args.unit_terms.split(",") if x.strip()))
     if not terms:
         parser.error("at least one term is required")
-    print(json.dumps(scan(args.url, terms, args.max_profiles, args.max_results, args.degree, unit_terms), ensure_ascii=False,
-                     separators=(",", ":")))
+    result = scan(args.url, terms, args.max_profiles, args.max_results, args.degree, unit_terms)
+    if args.degree and not args.full_roster:
+        roster = result.pop("roster")
+        result["roster_count"] = len(roster)
+        result["roster_sample"] = roster[:10]
+        result["omitted_roster"] = max(0, len(roster) - 10)
+        result["unit_directory_links"] = result["unit_directory_links"][:15]
+        result["note"] += " Degree-specific CLI output shows a compact roster sample; rerun with --full-roster if the name list is needed."
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
 
 
 if __name__ == "__main__":

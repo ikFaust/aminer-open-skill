@@ -51,6 +51,7 @@ from recommend import (  # noqa: E402
     resolve_people,
     score_candidates,
     select_profile_portfolio,
+    school_research_leads,
     school_level_map,
     school_search_terms,
     official_directory_hints,
@@ -105,11 +106,16 @@ class RecommendationLogicTests(unittest.TestCase):
         self.assertEqual(hints["浙江大学"][0]["url"], "https://www.cse.zju.edu.cn")
         self.assertIn("re-fetch", hints["浙江大学"][0]["scope"])
         self.assertEqual(hints["清华大学"][0]["url"], "https://www.au.tsinghua.edu.cn")
+        p3_hints = official_directory_hints(["上海交通大学"], "robot perception")
+        self.assertEqual({row["url"] for row in p3_hints["上海交通大学"]},
+                         {"https://sais.sjtu.edu.cn/faculty.html",
+                          "https://www.cs.sjtu.edu.cn/jiaoshiml.html"})
         self.assertEqual(official_directory_hints(["浙江大学"], "光纤通信"), {})
         p2_hints = official_directory_hints(["复旦大学", "上海交通大学", "苏州大学"], "multimodal")
         self.assertEqual(p2_hints["复旦大学"][0]["url"], "https://cs.fudan.edu.cn/szdw/list.htm")
         self.assertEqual(p2_hints["苏州大学"][0]["url"], "https://scst.suda.edu.cn/11250/list.htm")
-        self.assertNotIn("上海交通大学", p2_hints)
+        self.assertEqual(p2_hints["上海交通大学"][0]["url"],
+                         "https://www.cs.sjtu.edu.cn/jiaoshiml.html")
 
     def test_string_target_cycle_gives_correct_november_exam_timing(self):
         timing = application_timing(date(2026, 11, 4),
@@ -538,6 +544,32 @@ class RecommendationLogicTests(unittest.TestCase):
         self.assertEqual({s for row in selected for s in row.source_schools},
                          {"清华大学", "浙江大学", "上海交通大学"})
         self.assertEqual(len(selected), 3)
+
+    def test_school_research_leads_exposes_alternatives_hidden_by_portfolio_limit(self):
+        rows = [Candidate(person_id=f"a{i}", name=f"A {i}", source_schools={"A校"})
+                for i in range(4)]
+        rows.append(Candidate(person_id="b1", name="B 1", source_schools={"B校"}))
+        rows[1].papers["paper"] = {"title": "Task paper", "year": CURRENT_YEAR,
+                                  "direction_term_match": True}
+        visible = select_profile_portfolio(rows, 2, ["A校", "B校"])
+        self.assertEqual(len(visible), 2)
+        leads = school_research_leads(rows, ["A校", "B校", "C校"])
+        self.assertEqual([row["person_id"] for row in leads["A校"]], ["a0", "a1", "a2"])
+        self.assertEqual(leads["A校"][1]["evidence_paper"]["title"], "Task paper")
+        self.assertEqual([row["person_id"] for row in leads["B校"]], ["b1"])
+        self.assertEqual(leads["C校"], [])
+        self.assertTrue(all("verify current faculty" in row["status"]
+                            for school_rows in leads.values() for row in school_rows))
+
+    def test_school_research_leads_prefers_different_papers(self):
+        rows = [Candidate(person_id=f"p{i}", name=f"Person {i}", source_schools={"A校"})
+                for i in range(4)]
+        for index, paper_id in enumerate(("same", "same", "other", "third")):
+            rows[index].papers[paper_id] = {"id": paper_id, "title": paper_id,
+                                            "year": CURRENT_YEAR, "direction_term_match": True}
+        leads = school_research_leads(rows, ["A校"])["A校"]
+        self.assertEqual([row["person_id"] for row in leads], ["p0", "p2", "p3"])
+        self.assertEqual(set(leads[0]["evidence_paper"]), {"id", "title", "year", "aminer_url"})
 
     def test_obvious_cross_discipline_affiliation_is_filtered(self):
         medical = Candidate(person_id="m", name="A", org="University Hospital")

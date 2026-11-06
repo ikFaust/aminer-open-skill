@@ -30,5 +30,21 @@
     "direction_terms": ["multimodal", "多模态", "vision-language", "图文检索"],
     "checked_on": "2026-11-06",
     "note": "Navigation seed only. Re-fetch the live faculty pages; old master-supervisor statements do not certify current-cycle eligibility."
+  },
+  {
+    "school": "上海交通大学",
+    "unit": "自动化与感知学院教师名录",
+    "url": "https://sais.sjtu.edu.cn/faculty.html",
+    "direction_terms": ["robot", "机器人", "point cloud", "点云", "SLAM"],
+    "checked_on": "2026-11-06",
+    "note": "Navigation seed only. Faculty list loads through a same-host public AJAX endpoint; faculty_directory.py reads it and then re-fetches individual official pages."
+  },
+  {
+    "school": "上海交通大学",
+    "unit": "计算机学院教师名录",
+    "url": "https://www.cs.sjtu.edu.cn/jiaoshiml.html",
+    "direction_terms": ["multimodal", "多模态", "vision-language", "图文检索", "robot", "机器人", "point cloud", "点云"],
+    "checked_on": "2026-11-06",
+    "note": "Navigation seed only. Faculty list loads through a same-host public AJAX endpoint; faculty_directory.py reads it and then re-fetches individual official pages."
   }
 ]

@@ -1018,6 +1018,48 @@ def select_profile_portfolio(candidates: list[Candidate], limit: int,
     return selected[:limit]
 
 
+def school_research_leads(candidates: list[Candidate], schools: list[str],
+                          per_school_limit: int = 3) -> dict[str, list[dict[str, Any]]]:
+    """Keep a small, explicitly unverified search pool visible for every school.
+
+    The overall portfolio can hide a school's second or third candidate. These
+    rows are paper/interest leads, never claims of current faculty or eligibility.
+    """
+    result: dict[str, list[dict[str, Any]]] = {school: [] for school in schools}
+    for school in schools:
+        rows = [candidate for candidate in candidates if school in candidate.source_schools]
+        chosen: list[tuple[Candidate, dict[str, Any] | None]] = []
+        seen_papers: set[str] = set()
+        for distinct_paper_only in (True, False):
+            for candidate in rows:
+                if any(existing.person_id == candidate.person_id for existing, _ in chosen):
+                    continue
+                first_paper = next((paper for paper in candidate.papers.values()
+                                    if paper.get("direction_term_match")), None)
+                paper_key = str((first_paper or {}).get("id") or (first_paper or {}).get("title") or "")
+                if distinct_paper_only and paper_key in seen_papers:
+                    continue
+                chosen.append((candidate, first_paper))
+                if paper_key:
+                    seen_papers.add(paper_key)
+                if len(chosen) >= per_school_limit:
+                    break
+            if len(chosen) >= per_school_limit:
+                break
+        result[school] = [{
+            "name": candidate.display_name,
+            "person_id": candidate.person_id,
+            "aminer_url": None if candidate.person_id.startswith("unresolved:")
+            else f"https://www.aminer.cn/profile/{candidate.person_id}",
+            "interests": candidate.interests[:2],
+            "evidence_paper": {key: paper.get(key) for key in ("id", "title", "year", "aminer_url")}
+            if paper else None,
+            "identity_ambiguous": candidate.identity_ambiguous,
+            "status": "research lead only; verify current faculty identity, degree role and task fit",
+        } for candidate, paper in chosen]
+    return result
+
+
 def screen_recent_hires(ranked: list[Candidate], window_start: int) -> tuple[list[Candidate], dict[str, Any]]:
     """Split candidates for a recent-hire query: only faculty with positive hire
     evidence enter the pool; students/postdocs are excluded even when their fresh
@@ -2409,10 +2451,12 @@ def main() -> None:
         if args.mode == "profile":
             method_notes.append(
                 "The profile result is a paper-based lead pool, not a verified advisor list. "
-                "Use each candidate's returned affiliation unit to locate its official faculty directory; "
-                "check the requested degree role and a dated attributed paper, then run shortlist_gate "
-                "before naming anyone as a verified recommendation. Check one eligible person per named school "
-                "before a second person at any school."
+                "school_research_leads retains up to three unverified search leads per named school even when "
+                "the overall candidate limit hides them; do not call these people current faculty. "
+                "Use their affiliation units to locate official individual pages and verify task fit. "
+                "A person with official identity and specific work but no degree-role proof can be shown as a "
+                "pending research match; run shortlist_gate before calling anyone degree-role verified. "
+                "Check each named school before filling extra slots from a covered school."
             )
             method_notes.append(
                 f"Application advice must be relative to {as_of_date.isoformat()}: "
@@ -2442,6 +2486,8 @@ def main() -> None:
                 for school, org in organization_cache.items()
             },
             "candidate_counts_by_school": per_school,
+            "school_research_leads": school_research_leads(all_ranked, schools)
+            if args.mode == "profile" else {},
             "official_directory_hints": official_directory_hints(schools, args.direction)
             if args.mode == "profile" else {},
             "verification_next_action": (
