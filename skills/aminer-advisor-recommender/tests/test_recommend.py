@@ -1181,6 +1181,26 @@ class RecommendationLogicTests(unittest.TestCase):
                          {"direct", "few_data"})
         self.assertIn("AND", row["compound_focus"])
 
+    def test_grouped_few_shot_search_recalls_industrial_abstract_paper(self):
+        paper = {"id": "fesflow", "title": "Hierarchical Flow for Few-shot Anomaly Detection",
+                 "year": CURRENT_YEAR - 1,
+                 "abstract": "In industrial scenarios with limited data, tested on MVTec-AD and BTAD.",
+                 "authors": [{"name": "Researcher", "org": "Alpha University", "orgid": "a"}]}
+        client = ScriptedClient({
+            "org_search": [{"org_id": "a", "org_name": "Alpha University", "aliases": []}],
+            "paper_qa_search": lambda p: [{k: paper[k] for k in ("id", "title", "year")}]
+                               if p.get("topic_high") else [],
+            "paper_search_pro": [],
+            "paper_info": lambda p: [paper],
+            "paper_detail": lambda p: [paper],
+        })
+        row = discover_institutions(client, "industrial defect detection", ["few-shot learning"],
+                                    5, [], ["Alpha University"])[0]
+        self.assertEqual(row["matched_paper_count"], 1)
+        self.assertEqual(row["representative_papers"][0]["id"], "fesflow")
+        self.assertTrue(any(api == "paper_qa_search" and params.get("topic_high")
+                            for api, params in client.calls))
+
     def test_discover_title_view_recalls_direct_code_paper_qa_missed(self):
         paper = {"id": "class-eval", "title": "Evaluating Large Language Models in Class-Level Code Generation",
                  "year": CURRENT_YEAR - 2,

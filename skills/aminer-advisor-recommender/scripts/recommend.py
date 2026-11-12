@@ -702,12 +702,13 @@ def industrial_few_shot_defect_paper(row: dict[str, Any], detail: dict[str, Any]
     title = normalized_text((detail or {}).get("title") or row.get("title"))
     keywords = normalized_text(" ".join(str(k) for k in (detail or {}).get("keywords") or []))
     combined = title + " " + keywords
+    context = combined + " " + normalized_text((detail or {}).get("abstract") or row.get("abstract_slice"))
     if "zero-shot" in title and not re.search(r"few[- ]shot|few[- ]data|small[- ]samples?", title):
         return False
     defect = bool(re.search(r"\b(?:defect|anomal(?:y|ies))\b|缺陷|异常检测", combined))
     industrial = bool(re.search(
         r"\b(?:industr\w*|manufactur\w*|surface|product|fabric|textile|steel|"
-        r"quality inspection|mvtec)\b|工业|制造|表面|产品|纺织|钢板|质量检测", combined))
+        r"quality inspection|mvtec|btad|mpdd)\b|工业|制造|表面|产品|纺织|钢板|质量检测", context))
     low_data = bool(re.search(
         r"\b(?:few[- ]shot|few[- ]data|small[- ]samples?|limited data|low[- ]shot|"
         r"low[- ]data|one[- ]shot)\b|少样本|小样本|有限样本", combined))
@@ -2171,6 +2172,11 @@ def discover_institutions(
             and any(contains_any(term, ("few-shot", "few shot", "few-data", "少样本", "小样本"))
                     for term in terms)
         )
+        if industrial_few_shot_focus:
+            evidence_terms = list(dict.fromkeys([
+                *evidence_terms, "few-shot anomaly detection", "few-shot defect detection",
+                "few-data defect detection", "少样本异常检测",
+            ]))
         abstract_seed = "medical image" if medical_image_focus else discovery_abstract_seed(terms)
         if abstract_seed and abstract_seed not in evidence_terms:
             evidence_terms = [*evidence_terms, abstract_seed]
@@ -2225,6 +2231,29 @@ def discover_institutions(
                 for row in sample:
                     if row.get("id"):
                         search_rows.setdefault(str(row["id"]), row)
+            paired_samples: list[list[dict[str, Any]]] = []
+            if industrial_few_shot_focus:
+                # An OR-like per-term head sample can miss the actual
+                # intersection. The documented grouped-topic query is an
+                # independent lead path; detail attribution and the local
+                # compound predicate still decide what counts.
+                try:
+                    grouped = json.dumps([
+                        ["industrial defect detection", "surface defect detection", "anomaly detection"],
+                        ["few-shot", "few-shot learning", "few-shot segmentation", "few-data"],
+                    ])
+                    rows = unwrap(client.call("paper_qa_search", {
+                        "use_topic": True, "topic_high": grouped,
+                        "org_id": [organization.org_id], "size": max(20, paper_limit),
+                    }))
+                    current = [row for row in rows if isinstance(row.get("year"), int)
+                               and CURRENT_YEAR - 5 <= row["year"] <= CURRENT_YEAR]
+                    paired_samples.append(current)
+                    for row in current:
+                        if row.get("id"):
+                            search_rows.setdefault(str(row["id"]), row)
+                except AMinerAPIError as exc:
+                    warnings.append(f"{school}: grouped few-shot defect search failed ({exc.message})")
             keyword_rows: list[dict[str, Any]] = []
             recent_topic_rows: list[dict[str, Any]] = []
             keyword_total_hits: int | None = None
@@ -2281,6 +2310,7 @@ def discover_institutions(
                 qa_limit = (detail_cap - title_limit - abstract_limit
                             if multimodal_llm_focus else detail_cap)
                 selected_ids = list(dict.fromkeys([
+                    *bounded_paper_ids(paired_samples, min(12, detail_cap // 3)),
                     *bounded_paper_ids(title_samples, title_limit),
                     *ranked_abstract_ids(abstract_samples, abstract_limit),
                     *bounded_paper_ids(rows_by_term, qa_limit),

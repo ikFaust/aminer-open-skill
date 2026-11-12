@@ -24,6 +24,33 @@ from aminer_client import AMinerClient, unwrap
 
 
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
+HARD_RECOMMENDATION_FAILURES = (
+    "paper author affiliation does not establish the requested university",
+    "AMiner paper does not attribute the work to this person ID",
+    "paper title/year does not match the AMiner paper ID",
+    "person ID cannot be uniquely resolved",
+    "name does not match AMiner person ID",
+    "AMiner English profile cannot be bound",
+    "school domain is outside the requested institutions",
+)
+
+
+def partition_checked(checked: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    """Separate missing-source leads from hard identity/attribution failures."""
+    approved: list[dict] = []
+    leads: list[dict] = []
+    rejected: list[dict] = []
+    for row in checked:
+        if row.get("approved"):
+            approved.append(row)
+        elif any(any(marker in str(problem) for marker in HARD_RECOMMENDATION_FAILURES)
+                 for problem in row.get("problems", [])):
+            row["recommendation_eligible"] = False
+            row["rejection_type"] = "identity_or_paper_attribution"
+            rejected.append(row)
+        else:
+            leads.append(row)
+    return approved, leads, rejected
 
 
 def today_in_china() -> date:
@@ -554,8 +581,11 @@ def main() -> None:
                             "problems": ["school domain is outside the requested institutions"], "verified": {}})
         else:
             checked.append(verify_candidate(row, terms, args.degree, client, focus_terms))
-    print(json.dumps({"approved": [r for r in checked if r["approved"]],
-                      "leads": [r for r in checked if not r["approved"]],
+    approved, leads, rejected = partition_checked(checked)
+    print(json.dumps({"approved": approved,
+                      "leads": leads,
+                      "rejected": rejected,
+                      "rejected_note": "Identity or paper attribution failed. Exclude from both recommendation tiers unless corrected evidence is checked in a new gate run.",
                       "verification_scope": ("identity, an official faculty-role statement, and an attributed dated paper or quoted person-specific official project"
                                              if args.degree == "unspecified" else
                                              "identity, an official degree-role statement, and an attributed dated paper")

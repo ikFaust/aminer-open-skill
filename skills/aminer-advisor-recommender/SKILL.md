@@ -1,7 +1,7 @@
 ---
 name: aminer-advisor-recommender
 metadata:
-  version: 1.0.80
+  version: 1.0.81
   author: AMiner
   contact: report@aminer.cn
 description: >
@@ -17,6 +17,7 @@ When the script reports an English school alias recovered from an exact author p
 
 For a compound school-comparison topic, count only papers on the requested task. For example, a medical-image **segmentation** request needs segmentation work in a medical setting; medical-image classification, encryption, diagnosis, or fusion papers are adjacent leads, not segmentation counts. Keep broad retrieval totals separate from the checked task-paper count.
 If the request combines a task and a method with “与/和/and”, check that each counted paper supports **both** parts; otherwise report it separately as adjacent. In particular, industrial zero-shot anomaly detection is not few-shot defect detection, and few-shot machinery fault diagnosis is not visual defect detection. For this compound topic `discover` reports `matched_paper_count` only for papers satisfying both parts and `adjacent_topic_paper_count` for one-sided work. Recommend fewer than the maximum when remaining people have only adjacent work; explain the missing part rather than filling the last slot.
+For industrial few-shot detection, the grouped-topic QA pass is a recall lead. A paper may establish its industrial setting through the abstract's explicitly named industrial data or dataset (e.g. MVTec/BTAD), but the defect/anomaly task and low-data method must be supported by its title or keywords. Keep raw grouped hits out of the count until author affiliation and this joint topic check pass.
 
 If the user specifies a publication window (for example, **近三年**), a person without an individually attributed direction paper inside that window is a historical or adjacent lead, not a main recommendation. A paper outside the window can provide background but cannot fill a requested recent-work slot. Interpret “近三年” as the current calendar year and previous two calendar years unless the user gives dates; state the chosen interval.
 
@@ -314,6 +315,7 @@ Use these labels consistently:
 - Never claim an advisor is recruiting from publication activity alone. Direct users to the official department/advisor page.
 - If an AMiner paper year is later than the current date, treat the record as provisional until the publisher or preprint source confirms its date and status. Do not use it as established recent output. Do not infer a scholar's age, supervision availability, or admissions odds from title or citation count.
 - Never call unresolved name collisions verified people or emit an AMiner profile URL for them.
+- Read the gate output as three categories: `approved` may enter the verified tier after a task-fit review; `leads` still need independent evidence before any pending-tier use; `rejected` means identity or paper attribution failed and must not enter either recommendation tier on that evidence. An official faculty page alone cannot rescue a `rejected` paper link; obtain a corrected attributed work and rerun the gate. The requested maximum is a ceiling, not a quota.
 - A `recommend.py` named/profile candidate's `evidence_papers` is built after `paper_detail` author-affiliation inspection. Do not say that this author check was not performed when the candidate has an unambiguous exact-person resolution; separately state any missing official faculty or degree-role check. `official_seed_leads` and raw search cards are only leads and do not inherit this attribution.
 - Before sending the final answer, compare every AMiner `/profile/<id>` and `/pub/<id>` link character-for-character with the corresponding `person_id` or paper `id` in the tool result. Rebuild links from returned IDs; do not type or shorten IDs by memory. A link with an unmatched ID is unverified and must be corrected or omitted.
 - Keep Latin-script names in Latin script when an exact person ID or official page does not supply a Chinese spelling, including in excluded-person notes. Pinyin alone cannot distinguish Chinese surnames or given names.

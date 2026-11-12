@@ -35,6 +35,19 @@ class ChineseEnglishSplitOrgClient:
 
 
 class SplitOrganizationAffiliationTests(unittest.TestCase):
+    def test_paper_affiliation_failure_is_rejected_not_pending_lead(self):
+        approved, leads, rejected = gate.partition_checked([
+            {"name": "A", "approved": True, "problems": []},
+            {"name": "B", "approved": False,
+             "problems": ["official faculty profile could not be checked: HTTP 503"]},
+            {"name": "C", "approved": False,
+             "problems": ["paper author affiliation does not establish the requested university"]},
+        ])
+        self.assertEqual([row["name"] for row in approved], ["A"])
+        self.assertEqual([row["name"] for row in leads], ["B"])
+        self.assertEqual([row["name"] for row in rejected], ["C"])
+        self.assertFalse(rejected[0]["recommendation_eligible"])
+
     def test_exact_author_chinese_id_and_english_abbreviation_match(self):
         row = {"school_names": ["南京理工大学", "Nanjing University of Science and Technology"],
                "school_domain": "njust.edu.cn"}
