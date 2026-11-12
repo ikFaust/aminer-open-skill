@@ -1,7 +1,7 @@
 ---
 name: aminer-advisor-recommender
 metadata:
-  version: 1.0.81
+  version: 1.0.83
   author: AMiner
   contact: report@aminer.cn
 description: >
@@ -11,6 +11,8 @@ description: >
 # AMiner Advisor Recommender
 
 Use AMiner Open Platform REST APIs as the academic-data layer. Plan searches, normalize evidence, score candidates locally, and present explainable recommendations. Never treat a model's prior knowledge as current evidence.
+
+**First-gate deadline for any mentor list:** As soon as one candidate has a live individual official faculty page and an attributed dated on-topic paper, make the very next tool action a shortlist gate call for that person. Resume school coverage only after reading the gate result. Do not defer every gate until all schools or all five slots have been explored; reserve tool turns for final verification. If no gate ran, the verified tier is empty. Copy the number and names of schools actually searched from the tool result, not from the planned list.
 
 **Gate input preflight:** Every `verify_shortlist` candidate using an AMiner paper ID needs `name`, `school_domain` (the university domain, e.g. `buaa.edu.cn`), `school_names` (the first-level university name, e.g. `["北京航空航天大学"]`), `official_profile_url` (that person's page, not a directory), `person_id` when known, and `paper: {aminer_id, title, year}`. The gate uses `school_names` to normalize English paper affiliations; a department name in `organization` does not replace it. If the gate reports a missing field, correct that field before fetching more paid evidence or trying other candidates.
 When the script reports an English school alias recovered from an exact author profile, include **both** the Chinese university name and that English alias in `school_names`; AMiner may assign them different organization IDs and abbreviate the English author affiliation. Do not submit an already unreachable or empty official profile URL to the gate: it cannot approve current faculty identity, and repeated paid paper/person checks will not repair the missing official source. Keep that candidate in the pending tier, state the blocked URL, and gate only once a live person-specific official page has been found.

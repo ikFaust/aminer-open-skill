@@ -1182,22 +1182,29 @@ class RecommendationLogicTests(unittest.TestCase):
         self.assertIn("AND", row["compound_focus"])
 
     def test_grouped_few_shot_search_recalls_industrial_abstract_paper(self):
-        paper = {"id": "fesflow", "title": "Hierarchical Flow for Few-shot Anomaly Detection",
-                 "year": CURRENT_YEAR - 1,
-                 "abstract": "In industrial scenarios with limited data, tested on MVTec-AD and BTAD.",
-                 "authors": [{"name": "Researcher", "org": "Alpha University", "orgid": "a"}]}
+        papers = {
+            "fesflow": {"id": "fesflow", "title": "Hierarchical Flow for Few-shot Anomaly Detection",
+                        "year": CURRENT_YEAR - 1,
+                        "abstract": "In industrial scenarios with limited data, tested on MVTec-AD and BTAD."},
+            "nex": {"id": "nex", "title": "Few-shot Unsupervised Cross-Domain Defect Detection",
+                    "year": CURRENT_YEAR - 1,
+                    "abstract": "Industrial inspection on MVTec-AD surface images."},
+        }
+        for paper in papers.values():
+            paper["authors"] = [{"name": "Researcher", "org": "Alpha Univ, School of Computing", "orgid": "a"}]
         client = ScriptedClient({
             "org_search": [{"org_id": "a", "org_name": "Alpha University", "aliases": []}],
-            "paper_qa_search": lambda p: [{k: paper[k] for k in ("id", "title", "year")}]
+            "paper_qa_search": lambda p: [{k: paper[k] for k in ("id", "title", "year")}
+                                          for paper in papers.values()]
                                if p.get("topic_high") else [],
             "paper_search_pro": [],
-            "paper_info": lambda p: [paper],
-            "paper_detail": lambda p: [paper],
+            "paper_info": lambda p: [papers[pid] for pid in p["ids"]],
+            "paper_detail": lambda p: [papers[p["id"]]],
         })
         row = discover_institutions(client, "industrial defect detection", ["few-shot learning"],
                                     5, [], ["Alpha University"])[0]
-        self.assertEqual(row["matched_paper_count"], 1)
-        self.assertEqual(row["representative_papers"][0]["id"], "fesflow")
+        self.assertEqual(row["matched_paper_count"], 2)
+        self.assertEqual({p["id"] for p in row["representative_papers"]}, {"fesflow", "nex"})
         self.assertTrue(any(api == "paper_qa_search" and params.get("topic_high")
                             for api, params in client.calls))
 

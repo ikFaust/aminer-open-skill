@@ -414,6 +414,20 @@ def paper_search_org_name(organization: ResolvedOrganization) -> str:
                 organization.canonical_name)
 
 
+def school_affiliation_names(organization: ResolvedOrganization) -> list[str]:
+    """Include full institution names and their common exact Univ abbreviation.
+
+    An org ID alone is insufficient: AMiner sometimes assigns a university ID
+    to an author whose explicit paper affiliation names a different school.
+    """
+    names = [organization.canonical_name, organization.query, *organization.aliases]
+    return list(dict.fromkeys(
+        variant for name in names if name
+        for variant in (name, re.sub(r"\bUniversity\b", "Univ", name, flags=re.I))
+        if len(variant) > 4
+    ))
+
+
 def learn_english_school_alias(
     client: AMinerClient, organization: ResolvedOrganization,
     rows_by_term: list[list[dict[str, Any]]], warnings: list[str],
@@ -2174,7 +2188,8 @@ def discover_institutions(
         )
         if industrial_few_shot_focus:
             evidence_terms = list(dict.fromkeys([
-                *evidence_terms, "few-shot anomaly detection", "few-shot defect detection",
+                *evidence_terms, "defect detection", "anomaly detection", "few-shot",
+                "few-shot anomaly detection", "few-shot defect detection",
                 "few-data defect detection", "少样本异常检测",
             ]))
         abstract_seed = "medical image" if medical_image_focus else discovery_abstract_seed(terms)
@@ -2322,7 +2337,7 @@ def discover_institutions(
             weak_topic: list[dict[str, Any]] = []
             adjacent_topic: list[dict[str, Any]] = []
             affiliation_conflicts = 0
-            school_names = [organization.canonical_name, organization.query, *organization.aliases]
+            school_names = school_affiliation_names(organization)
             for paper_id in selected_ids:
                 detail = details.get(paper_id)
                 merged = dict(search_rows[paper_id], **info_by_id.get(paper_id, {}))
