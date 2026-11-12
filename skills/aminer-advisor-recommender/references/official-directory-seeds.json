@@ -3,7 +3,13 @@
     "school": "清华大学",
     "unit": "自动化系",
     "url": "https://www.au.tsinghua.edu.cn",
-    "direction_terms": ["robot", "机器人", "point cloud", "点云", "SLAM"],
+    "direction_terms": [
+      "robot",
+      "机器人",
+      "point cloud",
+      "点云",
+      "SLAM"
+    ],
     "checked_on": "2026-11-06",
     "note": "Navigation seed only. The live official faculty and degree-supervisor pages must be re-fetched."
   },
@@ -11,7 +17,13 @@
     "school": "浙江大学",
     "unit": "控制科学与工程学院",
     "url": "https://www.cse.zju.edu.cn",
-    "direction_terms": ["robot", "机器人", "point cloud", "点云", "SLAM"],
+    "direction_terms": [
+      "robot",
+      "机器人",
+      "point cloud",
+      "点云",
+      "SLAM"
+    ],
     "checked_on": "2026-11-06",
     "note": "Navigation seed only. The official college HTTPS entrance may fall back to the university home page; faculty_directory.py retries HTTP on the same host and must re-fetch the live roster."
   },
@@ -19,7 +31,12 @@
     "school": "复旦大学",
     "unit": "计算机科学技术学院师资目录",
     "url": "https://cs.fudan.edu.cn/szdw/list.htm",
-    "direction_terms": ["multimodal", "多模态", "vision-language", "图文检索"],
+    "direction_terms": [
+      "multimodal",
+      "多模态",
+      "vision-language",
+      "图文检索"
+    ],
     "checked_on": "2026-11-06",
     "note": "Navigation seed only. A bounded live directory probe found faculty links here, but no master's-role-and-dated-paper row; do not call every Fudan directory inaccessible."
   },
@@ -27,15 +44,40 @@
     "school": "苏州大学",
     "unit": "计算机科学与技术学院导师简介",
     "url": "https://scst.suda.edu.cn/11250/list.htm",
-    "direction_terms": ["multimodal", "多模态", "vision-language", "图文检索"],
+    "direction_terms": [
+      "multimodal",
+      "多模态",
+      "vision-language",
+      "图文检索"
+    ],
     "checked_on": "2026-11-06",
     "note": "Navigation seed only. Re-fetch the live faculty pages; old master-supervisor statements do not certify current-cycle eligibility."
+  },
+  {
+    "school": "杭州电子科技大学",
+    "unit": "官方教师个人主页检索",
+    "url": "https://faculty.hdu.edu.cn/jsgjcx/list.htm",
+    "direction_terms": [
+      "computer vision",
+      "object detection",
+      "目标检测",
+      "计算机视觉",
+      "图像"
+    ],
+    "checked_on": "2026-11-06",
+    "note": "Navigation seed only. This public WebPlus portal has a dynamic teacher-name index; re-query it with faculty_directory.py --names and fetch each returned individual official page. The index alone does not verify degree eligibility."
   },
   {
     "school": "上海交通大学",
     "unit": "自动化与感知学院教师名录",
     "url": "https://sais.sjtu.edu.cn/faculty.html",
-    "direction_terms": ["robot", "机器人", "point cloud", "点云", "SLAM"],
+    "direction_terms": [
+      "robot",
+      "机器人",
+      "point cloud",
+      "点云",
+      "SLAM"
+    ],
     "checked_on": "2026-11-06",
     "note": "Navigation seed only. Faculty list loads through a same-host public AJAX endpoint; faculty_directory.py reads it and then re-fetches individual official pages."
   },
@@ -43,8 +85,116 @@
     "school": "上海交通大学",
     "unit": "计算机学院教师名录",
     "url": "https://www.cs.sjtu.edu.cn/jiaoshiml.html",
-    "direction_terms": ["multimodal", "多模态", "vision-language", "图文检索", "robot", "机器人", "point cloud", "点云"],
+    "direction_terms": [
+      "multimodal",
+      "多模态",
+      "vision-language",
+      "图文检索",
+      "robot",
+      "机器人",
+      "point cloud",
+      "点云"
+    ],
     "checked_on": "2026-11-06",
     "note": "Navigation seed only. Faculty list loads through a same-host public AJAX endpoint; faculty_directory.py reads it and then re-fetches individual official pages."
+  },
+  {
+    "school": "东南大学",
+    "unit": "计算机科学与工程学院师资",
+    "url": "https://cse.seu.edu.cn/szdw/list.htm",
+    "direction_terms": [
+      "medical image",
+      "medical imaging",
+      "医学影像",
+      "医学图像"
+    ],
+    "checked_on": "2026-11-06",
+    "note": "Navigation seed only. Compare actual person pages and attributed medical-image papers before recommending."
+  },
+  {
+    "school": "哈尔滨工业大学",
+    "unit": "计算学部博士生导师目录",
+    "url": "https://computing.hit.edu.cn/_t690/bssds/list.htm",
+    "direction_terms": [
+      "medical image",
+      "medical imaging",
+      "医学影像",
+      "医学图像"
+    ],
+    "checked_on": "2026-11-06",
+    "note": "Navigation seed only. The directory establishes names and an indicated degree category, not medical-image fit or current openings."
+  },
+  {
+    "school": "南京医科大学",
+    "unit": "生物医学工程与信息学院导师风采",
+    "url": "https://bmei.njmu.edu.cn/10269/list.htm",
+    "direction_terms": [
+      "medical image",
+      "medical imaging",
+      "医学影像",
+      "医学图像"
+    ],
+    "checked_on": "2026-11-06",
+    "note": "Navigation seed only. Check each individual official page for the requested research and degree role."
+  },
+  {
+    "school": "上海大学",
+    "unit": "通信与信息工程学院电子信息工程系师资",
+    "url": "https://scie-ie.shu.edu.cn/szdw.htm",
+    "direction_terms": [
+      "computer vision",
+      "object detection",
+      "目标检测",
+      "计算机视觉",
+      "图像"
+    ],
+    "checked_on": "2026-11-06",
+    "note": "Navigation seed only. This official unit is reachable even when the university or computer-science site returns 403; verify each person's own page and do not infer computer-science college membership."
+  },
+  {
+    "school": "上海交通大学",
+    "unit": "人工智能学院专职教师",
+    "url": "https://soai.sjtu.edu.cn/cn/faculty/zzjs",
+    "direction_terms": [
+      "artificial intelligence",
+      "人工智能",
+      "machine learning",
+      "机器学习",
+      "multimodal",
+      "多模态",
+      "vision-language",
+      "图文检索",
+      "image-text retrieval"
+    ],
+    "checked_on": "2026-11-06",
+    "note": "Navigation seed only. Re-fetch an individual official faculty page before a current-role claim."
+  },
+  {
+    "school": "东南大学",
+    "unit": "仪器科学与工程学院师资",
+    "url": "https://ins.seu.edu.cn/zlf/list.htm",
+    "direction_terms": [
+      "robot learning",
+      "robot",
+      "机器人",
+      "manipulation",
+      "具身智能"
+    ],
+    "checked_on": "2026-11-06",
+    "note": "This person-specific official entrypoint is a navigation seed. Re-fetch the live page and do not infer paper authorship or admissions from the URL alone."
+  },
+  {
+    "school": "上海大学",
+    "unit": "未来技术学院正高级职称教师名录",
+    "url": "https://ai.shu.edu.cn/szdw/zgjzc.htm",
+    "direction_terms": [
+      "robot learning",
+      "机器人学习",
+      "具身智能",
+      "embodied",
+      "manipulation"
+    ],
+    "checked_on": "2026-11-07",
+    "note": "Navigation seed only. Re-fetch the person-specific official page and date-qualify claims from its 2024 publication."
   }
 ]

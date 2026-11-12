@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Fail-closed source check for a proposed advisor shortlist.
 
-This checks identity, an official supervisor-role statement and one attributed,
-dated paper per person. Current employment, current-cycle eligibility, research
-fit and openings still need separate evidence.
+This checks identity, an official faculty page and one attributed, dated paper
+per person. A specified degree additionally requires an official supervisor-role
+statement. Current employment, current-cycle eligibility, research fit and
+openings still need separate evidence.
 """
 
 from __future__ import annotations
@@ -65,7 +66,9 @@ def school_name_list(row: dict) -> list[str]:
 UMBRELLA_FOCUS_TERMS = {"ai", "artificial intelligence", "machine learning",
                         "deep learning", "multimodal", "多模态", "人工智能", "机器学习",
                         "mllm", "vlm", "lvlm", "vision-language", "视觉语言",
-                        "image-text", "text-image", "图文", "跨模态"}
+                        "image-text", "text-image", "图文", "跨模态",
+                        "robot", "robotics", "机器人", "具身智能", "embodied ai",
+                        "embodied intelligence"}
 
 
 def title_focus_matches(title: str, terms: list[str]) -> list[str]:
@@ -126,8 +129,10 @@ def fetch_profile_with_retry(url: str, school_domain: str, name: str,
         except Exception as exc:
             last_error = exc
             continue
-        score = (name in page[:2500], has_role_for_name(page, name, degree, roster=False), len(page))
-        best_score = (name in best[:2500], has_role_for_name(best, name, degree, roster=False), len(best))
+        role_ok = degree == "unspecified" or has_role_for_name(page, name, degree, roster=False)
+        best_role_ok = degree == "unspecified" or has_role_for_name(best, name, degree, roster=False)
+        score = (name in page[:2500], role_ok, len(page))
+        best_score = (name in best[:2500], best_role_ok, len(best))
         if score > best_score:
             best = page
         if score[0] and (score[1] or has_roster):
@@ -151,6 +156,7 @@ def has_role_for_name(page: str, name: str, degree: str, *, roster: bool) -> boo
     for match in re.finditer(re.escape(name), page):
         nearby = page[max(0, match.start() - 100):match.end() + width]
         if degree == "master" and ("硕士生导师" in nearby or "硕导" in nearby or
+                                   re.search(r"硕士生?\s*[/、和及与]\s*博士生?导师", nearby) or
                                    re.search(r"(?:报考本人|招收|招募|招生|欢迎.{0,5}(?:报考|申请)).{0,25}硕士(?:研究生|生)", nearby) or
                                    re.search(r"\b(?:looking for|recruiting|accepting).{0,80}\bmaster'?s?\s+(?:students?|applicants?)\b", nearby, re.I)):
             return True
@@ -171,12 +177,18 @@ def official_paper_match(page: str, title: str, year: int) -> bool:
 
 def profile_title_context(page: str, name: str) -> str:
     """Return a title close to this name on the individual official page."""
-    title = re.compile(r"(?:长聘)?(?:副教授|助理教授|教授|副研究员|研究员|讲师)")
-    for match in re.finditer(re.escape(name), page[:6000]):
-        after = page[match.end():match.end() + 100]
-        found = title.search(after)
-        if found and found.start() <= 50:
-            return page[match.start():match.end() + min(len(after), found.end() + 30)]
+    title = re.compile(r"(?:长聘)?(?:副教授|助理教授|教授|副研究员|助理研究员|研究员|讲师)"
+                       r"|\b(?:Assistant|Associate|Research|Full)?\s*Professor\b|\b(?:Researcher|Lecturer)\b", re.I)
+    names = [name]
+    parts = name.split()
+    if len(parts) == 2 and all(part.isascii() for part in parts):
+        names.append(" ".join(reversed(parts)))
+    for candidate in names:
+        for match in re.finditer(re.escape(candidate), page[:6000], re.I):
+            after = page[match.end():match.end() + 100]
+            found = title.search(after)
+            if found and found.start() <= 50:
+                return page[match.start():match.end() + min(len(after), found.end() + 30)]
     return ""
 
 
@@ -189,8 +201,10 @@ def displayed_page_date(page: str) -> str | None:
 
 def academic_title_near_name(context: str) -> str | None:
     """Extract only a title shown in the person's own heading/bio excerpt."""
-    match = re.search(r"长聘教授|特聘教授|副教授|助理教授|教授|副研究员|助理研究员|研究员|讲师", context)
-    return match.group(0) if match else None
+    match = re.search(r"长聘教授|特聘教授|副教授|助理教授|教授|副研究员|助理研究员|研究员|讲师"
+                      r"|\b(?:Assistant|Associate|Research|Full)?\s*Professor\b|\b(?:Researcher|Lecturer)\b",
+                      context, re.I)
+    return match.group(0).strip() if match else None
 
 
 def date_over_two_years_old(value: str) -> bool:
@@ -222,13 +236,24 @@ def paper_affiliation_match(authors: list[dict], person_id: str, row: dict,
         org_id = str(organization.get("org_id") or "")
         org_name = str(organization.get("org_name") or "")
         canonical = normalized(org_name)
-        if not org_id or len(canonical) < 8:
+        if not org_id or len(canonical) < 4:
             continue
         # AMiner often abbreviates "University" as "Univ" in paper author
         # affiliations while org_search returns the full canonical label.
         # Require the same org ID as well as one text form to avoid accepting
         # a contradictory author affiliation solely because an ID matches.
-        canonical_forms = {canonical, normalized(re.sub(r"\bUniversity\b", "Univ", org_name, flags=re.I))}
+        english_forms = []
+        for school_name in school_names:
+            if not re.search(r"\bUniversity\b", school_name, re.I):
+                continue
+            english_forms.extend((
+                school_name,
+                re.sub(r"\bUniversity\b", "Univ", school_name, flags=re.I),
+                re.sub(r"\bUniversity of Science and Technology\b",
+                       "Univ Sci & Technol", school_name, flags=re.I),
+            ))
+        canonical_forms = {canonical, normalized(re.sub(r"\bUniversity\b", "Univ", org_name, flags=re.I)),
+                           *(normalized(value) for value in english_forms)}
         for author in target_authors:
             author_org_id = str(author.get("orgid") or "")
             if not any(form in normalized(str(author.get("org") or ""))
@@ -261,6 +286,21 @@ def verify_candidate(row: dict, program_terms: list[str], degree: str,
     paper = row.get("paper") if isinstance(row.get("paper"), dict) else {}
     paper_id = str(paper.get("aminer_id") or "")
     person_id = str(row.get("person_id") or "")
+    if paper_id and client and not school_name_list(row):
+        problems.append("school_names is required for AMiner paper affiliation; supply the first-level university name")
+        return result
+    # A blocked or missing official page makes approval impossible. Check it
+    # before any paid person/paper detail call, then reuse the fetched text.
+    url = str(row.get("official_profile_url") or "")
+    if not url:
+        problems.append("official faculty profile URL is missing")
+        return result
+    try:
+        page = fetch_profile_with_retry(url, domain, name, degree,
+                                        bool(row.get("official_supervisor_url")))
+    except Exception as exc:
+        problems.append(f"official faculty profile could not be checked: {exc}")
+        return result
     prefetched_paper = None
     if not person_id and paper_id and client:
         school_names = school_name_list(row)
@@ -286,6 +326,7 @@ def verify_candidate(row: dict, program_terms: list[str], degree: str,
         else:
             problems.append("school_names is required to resolve a paper author without person_id")
     english_alias_pending = ""
+    official_english_alias = ""
     if person_id:
         if client is None:
             problems.append("AMiner credential is missing for person ID check")
@@ -296,8 +337,13 @@ def verify_candidate(row: dict, program_terms: list[str], degree: str,
                 english = str(person.get("name") or "").strip()
                 canonical = chinese or english
                 result["verified"]["canonical_name"] = canonical
+                if chinese and name == chinese and english:
+                    official_english_alias = english
                 if chinese and name != chinese:
-                    problems.append(f"name does not match AMiner person ID; use {canonical}")
+                    if normalized(name) == normalized(english):
+                        result["verified"]["official_page_english_name"] = english
+                    else:
+                        problems.append(f"name does not match AMiner person ID; use {canonical}")
                 elif not chinese and normalized(name) != normalized(english):
                     if re.search(r"[\u3400-\u9fff]", name):
                         english_alias_pending = english
@@ -306,18 +352,19 @@ def verify_candidate(row: dict, program_terms: list[str], degree: str,
             except Exception as exc:
                 problems.append(f"person ID could not be checked: {exc}")
 
-    url = str(row.get("official_profile_url") or "")
-    page = ""
+    profile_name = name
     profile_date = None
     profile_title = None
-    if not url:
-        problems.append("official faculty profile URL is missing")
-    else:
+    if page:
         try:
-            page = fetch_profile_with_retry(url, domain, name, degree,
-                                            bool(row.get("official_supervisor_url")))
             result["verified"]["official_profile_url"] = url
-            title_context = profile_title_context(page, name)
+            if name not in page[:2500] and official_english_alias and \
+                    normalized(official_english_alias) in normalized(page[:2500]):
+                # The ID-verified AMiner record binds the Chinese and English
+                # names; the university page must still state an actual role.
+                profile_name = official_english_alias
+                result["verified"]["official_page_english_name"] = official_english_alias
+            title_context = profile_title_context(page, profile_name)
             if title_context:
                 result["verified"]["official_profile_title_context"] = title_context
                 profile_title = academic_title_near_name(title_context)
@@ -329,7 +376,7 @@ def verify_candidate(row: dict, program_terms: list[str], degree: str,
                 if date_over_two_years_old(profile_date):
                     result.setdefault("warnings", []).append(
                         "official profile displays a date over two years old; verify current faculty and degree status")
-            if name not in page[:2500]:
+            if profile_name not in page[:2500]:
                 problems.append("exact name is absent from the official profile heading/body")
             if program_terms and not any(term in page[:2500] for term in program_terms):
                 problems.append("requested program is absent from the official profile")
@@ -341,9 +388,9 @@ def verify_candidate(row: dict, program_terms: list[str], degree: str,
         except Exception as exc:
             problems.append(f"official faculty profile could not be checked: {exc}")
 
-    role_verified = has_role_for_name(page, name, degree, roster=False)
+    role_verified = has_role_for_name(page, profile_name, degree, roster=False)
     role_url = str(row.get("official_supervisor_url") or "")
-    if role_url:
+    if role_url and degree != "unspecified":
         try:
             role_page = fetch_official(role_url, domain)
             result["verified"]["official_supervisor_url"] = role_url
@@ -372,11 +419,20 @@ def verify_candidate(row: dict, program_terms: list[str], degree: str,
                 result.setdefault("warnings", []).append(f"optional supervisor roster unavailable; profile role used: {exc}")
             else:
                 problems.append(f"official supervisor roster could not be checked: {exc}")
-    if not role_verified:
+    if degree == "unspecified" and page:
+        faculty_role = (profile_title or
+                        ("硕士生导师" if has_role_for_name(page, profile_name, "master", roster=False) else None) or
+                        ("博士生导师" if has_role_for_name(page, profile_name, "doctor", roster=False) else None))
+        if faculty_role:
+            result["verified"]["official_faculty_role"] = faculty_role
+        else:
+            problems.append("official profile does not establish this person's faculty role")
+    elif degree != "unspecified" and not role_verified:
         problems.append(f"official {degree} supervisor evidence is missing")
 
     title = str(paper.get("title") or "").strip()
     year = paper.get("year")
+    official_project = row.get("official_project") if isinstance(row.get("official_project"), dict) else {}
     # This is a literal overlap diagnostic, not a semantic fit verdict. It
     # makes an adjacent credential paper visible instead of silently treating
     # any dated paper as evidence for the applicant's specific project.
@@ -389,7 +445,17 @@ def verify_candidate(row: dict, program_terms: list[str], degree: str,
                                        if term.casefold() in UMBRELLA_FOCUS_TERMS],
         }
     current_year = today_in_china().year
-    if not title or not isinstance(year, int) or not (current_year - 5 <= year <= current_year):
+    if degree == "unspecified" and not title and official_project:
+        project_title = str(official_project.get("title") or "").strip()
+        project_excerpt = str(official_project.get("excerpt") or "").strip()
+        if (not page or not project_title or len(project_excerpt) < 35 or
+                normalized(project_title) not in normalized(page) or
+                normalized(project_excerpt) not in normalized(page)):
+            problems.append("person-specific official project title and concrete quoted excerpt are not established on the faculty page")
+        else:
+            result["verified"]["official_project_title"] = project_title
+            result["verified"]["official_project_excerpt"] = project_excerpt[:400]
+    elif not title or not isinstance(year, int) or not (current_year - 5 <= year <= current_year):
         problems.append("one titled direction paper dated within the past five years is required")
     else:
         official_paper = bool(page and official_paper_match(page, title, year))
@@ -398,8 +464,28 @@ def verify_candidate(row: dict, program_terms: list[str], degree: str,
                 source = prefetched_paper or record_data(client, "paper_detail", paper_id)
                 authors = source.get("authors") or []
                 paper_problem_count = len(problems)
+                source_year = source.get("year")
+                info_record = None
+                if not isinstance(source_year, int):
+                    info_rows = unwrap(client.call("paper_info", {"ids": [paper_id]}))
+                    matching_info = [item for item in info_rows
+                                     if str(item.get("id") or "") == paper_id]
+                    info_record = matching_info[0] if len(matching_info) == 1 else None
+                    source_year = info_record.get("year") if info_record else None
+                if not isinstance(source_year, int):
+                    def venue_label(item: dict) -> str:
+                        venue = item.get("venue")
+                        return str((venue.get("raw") if isinstance(venue, dict) else venue)
+                                   or item.get("venue_name") or "")
+                    venue_years = {int(value) for item in (source, info_record or {})
+                                   for value in re.findall(r"\b20\d{2}\b", venue_label(item))}
+                    if venue_years == {year}:
+                        source_year = year
+                        result["verified"]["paper_year_source"] = "AMiner venue label"
+                        result.setdefault("warnings", []).append(
+                            "paper year is supported by the AMiner venue label; publication status needs a primary-source check")
                 if (normalized(str(source.get("title") or "")) != normalized(title)
-                        or source.get("year") != year):
+                        or source_year != year):
                     problems.append("paper title/year does not match the AMiner paper ID")
                 if not any(str(a.get("id") or "") == person_id for a in authors):
                     problems.append("AMiner paper does not attribute the work to this person ID")
@@ -439,7 +525,7 @@ def main() -> None:
                                   help="Read a UTF-8 JSON candidate array from standard input")
     parser.add_argument("--program-terms", default="", help="Exact official program names, only when the user specified a program or college")
     parser.add_argument("--allowed-domains", required=True, help="Comma-separated edu.cn domains of the requested schools")
-    parser.add_argument("--degree", choices=("master", "doctor"), required=True)
+    parser.add_argument("--degree", choices=("master", "doctor", "unspecified"), required=True)
     parser.add_argument("--focus-terms", required=True,
                         help="Comma-separated, applicant-specific topic/task aliases; omit umbrella field names")
     args = parser.parse_args()
@@ -470,7 +556,10 @@ def main() -> None:
             checked.append(verify_candidate(row, terms, args.degree, client, focus_terms))
     print(json.dumps({"approved": [r for r in checked if r["approved"]],
                       "leads": [r for r in checked if not r["approved"]],
-                      "verification_scope": "identity, an official degree-role statement, and an attributed dated paper; current employment, current-cycle eligibility, research fit, and openings are not certified",
+                      "verification_scope": ("identity, an official faculty-role statement, and an attributed dated paper or quoted person-specific official project"
+                                             if args.degree == "unspecified" else
+                                             "identity, an official degree-role statement, and an attributed dated paper")
+                                            + "; current employment, current-cycle eligibility, research fit, and openings are not certified",
                       "aminer_cost": client.cost.summary() if client else None}, ensure_ascii=False, indent=2))
 
 

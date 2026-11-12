@@ -23,6 +23,7 @@ from aminer_client import API_SPEC, AMinerAPIError, AMinerClient, unwrap
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TIERS = SKILL_ROOT / "references" / "school-tiers.json"
 DIRECTORY_SEEDS = SKILL_ROOT / "references" / "official-directory-seeds.json"
+PROFILE_SEEDS = SKILL_ROOT / "references" / "official-profile-seeds.json"
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 CURRENT_YEAR = datetime.now(CHINA_TZ).year
 FACULTY_TERMS = (
@@ -48,6 +49,10 @@ CROSS_DISCIPLINE_AFFILIATION_TERMS = (
     "医院", "医学院", "临床", "公共卫生", "经济学院", "商学院", "体育学院", "文学院", "哲学",
     "考古", "化学学院", "化工学院", "资源环境",
 )
+COMPUTING_AFFILIATION_TERMS = (
+    "computer", "computing", "informatics", "software", "artificial intelligence",
+    "automation", "robot", "计算机", "软件", "人工智能", "自动化", "机器人",
+)
 
 # Off-field topics that appear in a scholar's OWN interests (not affiliation).
 # Blacklist of clearly-unrelated disciplines seen contaminating recall via
@@ -55,10 +60,10 @@ CROSS_DISCIPLINE_AFFILIATION_TERMS = (
 # is almost never a CS/AI subfield, so real subfields are never removed.
 CROSS_DISCIPLINE_INTEREST_TERMS = (
     "clinical", "prenatal", "cancer", "tumor", "surgery", "gut microbiota", "epidemiology",
-    "reactor", "nuclear", "monte carlo", "combustion", "pyrolysis", "catalysis", "photocatalysis",
+    "reactor", "nuclear reactor", "nuclear physics", "nuclear energy", "monte carlo", "combustion", "pyrolysis", "catalysis", "photocatalysis",
     "urban planning", "architecture", "seagrass", "climate change", "batteries", "lithium",
     "nanocryst", "quantum dot", "supramolecular", "metal-organic", "silicon", "photonic",
-    "临床", "产前", "肿瘤", "癌", "反应堆", "核", "燃烧", "催化", "城市规划", "建筑", "电池", "材料",
+    "临床", "产前", "肿瘤", "癌", "反应堆", "核工程", "核物理", "燃烧", "催化", "城市规划", "建筑", "电池", "材料",
 )
 
 
@@ -131,6 +136,87 @@ def official_directory_hints(schools: list[str], direction: str) -> dict[str, li
     return hints
 
 
+def official_profile_hints(candidates: list[Candidate]) -> list[dict[str, str]]:
+    """Return checked official URLs only for exact discovered people and schools.
+
+    URLs are navigation aids. A live re-fetch must establish every role, date,
+    topic and degree claim; the seed itself carries none of those assertions.
+    """
+    try:
+        seeds = json.loads(PROFILE_SEEDS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    known = {(str(row.get("school") or ""), str(row.get("name") or "")): row
+             for row in seeds if isinstance(row, dict)}
+    result = []
+    seen = set()
+    for candidate in candidates:
+        if candidate.identity_ambiguous:
+            continue
+        for school in candidate.source_schools:
+            row = known.get((school, candidate.display_name))
+            if not row or (school, candidate.display_name) in seen:
+                continue
+            seen.add((school, candidate.display_name))
+            result.append({"school": school, "name": candidate.display_name,
+                           "url": str(row["url"]), **official_url_seed_metadata(row),
+                           "scope": "official profile navigation only; re-fetch live page and verify claims"})
+    return result
+
+
+def official_url_seed_metadata(row: dict[str, Any]) -> dict[str, str]:
+    """Keep URL availability separate from the source page's own age."""
+    result = {"url_checked_on": str(row.get("checked_on") or "")}
+    published = str(row.get("source_page_published_on") or "")
+    if published:
+        result["source_page_published_on"] = published
+        try:
+            if (datetime.now(CHINA_TZ).date() - date.fromisoformat(published)).days > 730:
+                result["stale_page_warning"] = (
+                    f"Official page published {published}, over two years ago; "
+                    "do not assert current faculty or degree status from it. Re-fetch and date-qualify claims."
+                )
+        except ValueError:
+            pass
+    return result
+
+
+def official_seed_leads(schools: list[str], direction: str, aliases: list[str]) -> dict[str, list[dict[str, str]]]:
+    """Independent official-page recall for sparse AMiner school samples.
+
+    A curated URL is only a person to investigate. It cannot establish current
+    employment, task fit, degree role, or a paper without a live page and
+    independent attribution check.
+    """
+    try:
+        seeds = json.loads(PROFILE_SEEDS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    query = normalized_text(" ".join([direction, *aliases]))
+    leads: dict[str, list[dict[str, str]]] = {}
+    for row in seeds:
+        if not isinstance(row, dict) or row.get("school") not in schools:
+            continue
+        if not any(normalized_text(term) in query for term in row.get("topic_terms", [])):
+            continue
+        school = str(row["school"])
+        leads.setdefault(school, []).append({
+            "name": str(row["name"]), "url": str(row["url"]),
+            **official_url_seed_metadata(row),
+            "scope": "official URL lead only; re-fetch and independently verify topic paper and faculty role",
+        })
+    return {school: rows[:3] for school, rows in leads.items()}
+
+
+def school_tier_facts(schools: list[str], tiers: dict[str, Any]) -> dict[str, dict[str, bool]]:
+    """Expose exact national-list membership for named applicant schools."""
+    groups = tiers.get("tiers") or {}
+    return {school: {
+        label: school in set((groups.get(label) or {}).get("schools") or [])
+        for label in ("985", "211", "双一流")
+    } for school in schools}
+
+
 def parse_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
@@ -161,6 +247,7 @@ class Candidate:
     papers: dict[str, dict[str, Any]] = field(default_factory=dict)
     collaboration_orgs: dict[str, str] = field(default_factory=dict)
     collaboration_types: dict[str, str] = field(default_factory=dict)
+    collaboration_papers: dict[str, set[str]] = field(default_factory=dict)
     scores: dict[str, float | None] = field(default_factory=dict)
     confidence: str = "low"
     recommendation_band: str | None = None
@@ -207,9 +294,13 @@ class Candidate:
             "evidence_papers": list(self.papers.values()),
             "collaboration_organizations": [
                 {"id": key, "name": value, "type": self.collaboration_types.get(key, "unknown"),
-                 "is_university": is_university_affiliation(value)}
+                 "is_university": is_university_affiliation(value),
+                 "paper_urls": [f"https://www.aminer.cn/pub/{paper_id}"
+                                for paper_id in sorted(self.collaboration_papers.get(key, set()))]}
                 for key, value in self.collaboration_orgs.items()
             ],
+            "collaboration_evidence_paper_count": len(set().union(
+                *self.collaboration_papers.values())) if self.collaboration_papers else 0,
             "scores": self.scores,
             "confidence": self.confidence,
             "recommendation_band": self.recommendation_band,
@@ -297,7 +388,7 @@ def paper_search(client: AMinerClient, direction: str, organization: ResolvedOrg
         }))
         if rows:
             return rows
-        org_name = organization.canonical_name
+        org_name = paper_search_org_name(organization)
     else:
         org_name = organization
     # query searches the title as well as keywords. keyword alone missed the
@@ -306,6 +397,203 @@ def paper_search(client: AMinerClient, direction: str, organization: ResolvedOrg
     if org_name:
         params["org"] = org_name
     return unwrap(client.call("paper_search_pro", params))
+
+
+def paper_search_org_name(organization: ResolvedOrganization) -> str:
+    """Prefer a verified English university spelling for name-filtered search."""
+    # org_search aliases are often word-order variants, not equally indexed
+    # institution names.  An English canonical name is the indexed spelling:
+    # replacing "Nanjing University of Posts and Telecommunications" with its
+    # first alias ("nanjing posts telecommunications university") made a
+    # directly relevant code-generation paper disappear from every name-
+    # filtered search despite the organization ID being correct.
+    if re.search(r"\b(?:university|institute of technology)\b", organization.canonical_name, re.I):
+        return organization.canonical_name
+    return next((name for name in organization.aliases
+                 if re.search(r"\b(?:university|institute of technology)\b", name, re.I)),
+                organization.canonical_name)
+
+
+def learn_english_school_alias(
+    client: AMinerClient, organization: ResolvedOrganization,
+    rows_by_term: list[list[dict[str, Any]]], warnings: list[str],
+) -> None:
+    """Use an ID-linked paper author profile to bridge split Chinese/English orgs.
+
+    AMiner can place the Chinese university and its English spelling under
+    different organization IDs. The alias is accepted only when a paper author
+    carries the resolved Chinese ID and the exact person profile confirms it.
+    """
+    if paper_search_org_name(organization) != organization.canonical_name:
+        return
+    if not re.search(r"[一-鿿]", organization.canonical_name):
+        return
+    profile_lookups = 0
+    for paper_id in bounded_paper_ids(rows_by_term, 3):
+        try:
+            details = unwrap(client.call("paper_detail", {"id": paper_id}))
+        except AMinerAPIError as exc:
+            warnings.append(f"{organization.query}: English alias probe failed ({exc.message})")
+            continue
+        for detail in details:
+            for author in detail.get("authors") or []:
+                if (not isinstance(author, dict) or
+                        str(author.get("orgid") or "") != organization.org_id or
+                        not author.get("id") or not author.get("name")):
+                    continue
+                if profile_lookups >= 8:
+                    return
+                profile_lookups += 1
+                try:
+                    profiles = unwrap(client.call("person_search", {
+                        "name": author["name"], "org_id": [organization.org_id], "size": 10,
+                    }))
+                except AMinerAPIError:
+                    continue
+                for profile in profiles:
+                    if (str(profile.get("id") or "") != str(author["id"]) or
+                            str(profile.get("org_id") or "") != organization.org_id or
+                            not contains_any(str(profile.get("org_zh") or ""),
+                                             [organization.canonical_name])):
+                        continue
+                    alias = extract_institution_name(str(profile.get("org") or ""))
+                    alias = re.sub(r"\s*&\s*", " and ", alias)
+                    if (alias and alias != organization.canonical_name and
+                            re.search(r"\b(?:university|institute of technology)\b", alias, re.I)):
+                        organization.aliases.append(alias)
+                        warnings.append(f"{organization.query}: recovered English search alias from exact ID-linked author profile: {alias}")
+                        return
+
+
+def title_search_seeds(terms: list[str], keep_primary_broad: bool = False) -> list[str]:
+    """Turn narrow English aliases into complementary title-search phrases.
+
+    QA topic search can bury a directly relevant paper below its small first page.
+    Title search is an independent retrieval path, not evidence of author identity.
+    """
+    generic = {"ai", "artificial", "intelligence", "learning", "research", "analysis", "based"}
+    seeds: list[str] = []
+    for term in terms:
+        words = re.findall(r"[a-z][a-z0-9-]*", term.lower())
+        if not words or not re.search(r"[a-z]", term):
+            continue
+        distinctive = [word for word in words if word not in generic]
+        if not distinctive:
+            continue
+        # Retain full four-word tasks such as "remote sensing object detection";
+        # dropping the last word can substantially widen AMiner's OR-like box.
+        # Other three-word tasks such as "oriented object detection" are intact.
+        # suffixes in "embodied intelligence" and "robot learning" are dropped.
+        seed = " ".join(distinctive[:4])
+        if len(seed) < 4 or seed in seeds:
+            continue
+        seeds.append(seed)
+    # A broad primary direction can otherwise consume 18 of the 20 reserved
+    # paper-detail slots before the applicant's actual task gets inspected.
+    broad = {"computer vision", "deep", "vision", "image", "artificial",
+             "machine", "multimodal", "robot", "embodied"}
+    specific = [seed for seed in seeds if seed not in broad]
+    if keep_primary_broad and seeds and seeds[0] in broad:
+        return [seeds[0], *[seed for seed in specific if seed != seeds[0]][:1]]
+    if any("multimodal large language model" in normalized_text(term) or
+           normalized_text(term) in {"mllm", "多模态大模型"} for term in terms):
+        # AnyGPT and similar direct MLLM papers use "multimodal LLM" in the
+        # title, not the long-form phrase. This live-tested alias recovers
+        # their authors without naming a particular scholar or model family.
+        return list(dict.fromkeys(["multimodal llm", *(specific or seeds)]))[:3]
+    if keep_primary_broad:
+        # Collaboration evidence may live in a specific third or fourth
+        # branch (e.g. EEG decoding rather than the umbrella BCI phrase).
+        return (specific or seeds)[:4]
+    return (specific or seeds)[:2]
+
+
+def remote_sensing_object_detection_title(title: str) -> bool:
+    """Match the task, including titles that omit the redundant word 'object'."""
+    value = normalized_text(title)
+    domain = bool(re.search(r"\b(?:remote sensing|aerial imag\w*|satellite imag\w*|sar)\b", value))
+    detection = bool(re.search(r"\bdetect(?:ion|or|ing)?\b", value))
+    adjacent = bool(re.search(r"\b(?:change|cloud|anomaly|salient object) detection\b", value))
+    return domain and detection and not adjacent
+
+
+def complementary_title_search(
+    client: AMinerClient, organization: ResolvedOrganization, terms: list[str],
+    warnings: list[str], keep_primary_broad: bool = False,
+) -> list[list[dict[str, Any]]]:
+    """Recall school papers the org-ID QA head sample misses.
+
+    As with the general academic skill, use the documented title/org/year and
+    title/org/citation views. Details and exact author affiliations remain the
+    downstream source of attribution; an org-filtered search hit alone is not.
+    """
+    samples: list[list[dict[str, Any]]] = []
+    seeds = title_search_seeds(terms, keep_primary_broad)
+    for index, seed in enumerate(seeds):
+        orders = ("n_citation", "year") if index == 0 else ("n_citation",)
+        keyword_seed = keep_primary_broad and index == 0
+        for order in orders:
+            try:
+                rows = unwrap(client.call("paper_search_pro", {
+                    ("keyword" if keyword_seed else "title"): seed,
+                    "org": paper_search_org_name(organization),
+                    "size": 100, "page": 0, "order": order,
+                    "year_from": CURRENT_YEAR - 5, "year_to": CURRENT_YEAR,
+                }))
+            except AMinerAPIError as exc:
+                warnings.append(f"{organization.query}: title search {seed}/{order} failed ({exc.message})")
+                continue
+            # A broad keyword lead can have no field phrase in its title (for
+            # example AgentVLN has an embodied-AI keyword). Author affiliation
+            # and topic are checked in paper_detail downstream. Narrow title
+            # seeds still require the literal stem on the returned card.
+            remote_object_focus = any("remote sensing object detection" in normalized_text(t)
+                                      or "遥感图像目标检测" in str(t) for t in terms)
+            samples.append([row for row in rows if isinstance(row.get("year"), int)
+                            and CURRENT_YEAR - 5 <= row["year"] <= CURRENT_YEAR
+                            and (keyword_seed or contains_any(str(row.get("title") or ""), [seed])
+                                 or (remote_object_focus and remote_sensing_object_detection_title(
+                                     str(row.get("title") or ""))))])
+    return samples
+
+
+def complementary_abstract_search(
+    client: AMinerClient, organization: ResolvedOrganization, terms: list[str],
+    warnings: list[str],
+) -> list[list[dict[str, Any]]]:
+    """Find school papers whose model or method name hides the field in the title.
+
+    This is the same abstract+organization retrieval path used by the general
+    academic skill. Search cards are leads only; paper_detail and author
+    affiliation still decide whether a scholar can be recommended.
+    """
+    seed = next((term.strip() for term in terms
+                 if 2 <= len(re.findall(r"[a-z][a-z0-9-]*", term.lower())) <= 8), None)
+    if not seed:
+        return []
+    samples: list[list[dict[str, Any]]] = []
+    for order in ("n_citation", "year"):
+        try:
+            rows = unwrap(client.call("paper_search_pro", {
+                "abstract": seed, "org": paper_search_org_name(organization),
+                "size": 100, "page": 0, "order": order,
+            }))
+        except AMinerAPIError as exc:
+            warnings.append(f"{organization.query}: abstract search {seed}/{order} failed ({exc.message})")
+            continue
+        samples.append([row for row in rows if isinstance(row.get("year"), int)
+                        and CURRENT_YEAR - 5 <= row["year"] <= CURRENT_YEAR])
+    return samples
+
+
+def discovery_abstract_seed(terms: list[str]) -> str | None:
+    """Use a repeated field stem for broad institution discovery."""
+    phrases = [re.findall(r"[a-z][a-z0-9-]*", term.lower()) for term in terms]
+    pairs = Counter(pair for words in phrases for pair in set(zip(words, words[1:])))
+    shared = [pair for pair, count in pairs.items() if count >= 2]
+    if shared:
+        return " ".join(max(shared, key=lambda pair: (pairs[pair], sum(map(len, pair)))))
+    return next((" ".join(words) for words in phrases if len(words) >= 2), None)
 
 
 def batch_paper_info(client: AMinerClient, paper_ids: list[str], warnings: list[str]) -> list[dict[str, Any]]:
@@ -324,6 +612,10 @@ def clean_paper(row: dict[str, Any], detail: dict[str, Any] | None, terms: list[
     keywords = " ".join(str(x) for x in ((detail or {}).get("keywords") or []))
     abstract = " ".join([str(row.get("abstract_slice") or ""), str((detail or {}).get("abstract") or "")])
     title_terms = [term for term in terms if contains_any(title, [term])]
+    if any("remote sensing object detection" in normalized_text(term)
+           or "遥感图像目标检测" in term for term in terms):
+        if remote_sensing_object_detection_title(title) and not title_terms:
+            title_terms.append("remote sensing object detection (task-equivalent title)")
     keyword_terms = [term for term in terms if contains_any(keywords, [term])]
     abstract_terms = [term for term in terms if contains_any(abstract, [term])]
     matched = list(dict.fromkeys([*title_terms, *keyword_terms, *abstract_terms]))
@@ -361,6 +653,67 @@ def multimodal_llm_paper(row: dict[str, Any], detail: dict[str, Any] | None) -> 
     return modality_in_title and model_in_title
 
 
+def medical_imaging_title_focus(title: str) -> bool:
+    """Distinguish a medical-imaging method from a generic model with a broad keyword."""
+    return contains_any(title, (
+        "medical", "biomedical", "clinical", "radiolog", "radiograph", "ultrasound",
+        "echocardi", "dermoscop", "dermatolog", "patholog", "tumor", "tumour",
+        "lesion", "retina", "ophthalm", "samed", "medsam", "medmnist",
+        "医学", "影像", "病理", "肿瘤", "超声",
+    )) or bool(re.search(r"\b(?:mri|ct|pet|x-ray|xray)\b", title, re.IGNORECASE))
+
+
+def medical_segmentation_paper(row: dict[str, Any], detail: dict[str, Any] | None) -> bool:
+    """Count a medical-segmentation paper only when both task and domain are explicit.
+
+    A broad ``medical image`` search also retrieves classification, encryption,
+    diagnosis and fusion papers. Those are useful leads, not segmentation output.
+    """
+    title = str((detail or {}).get("title") or row.get("title") or "")
+    keywords = " ".join(str(k) for k in (detail or {}).get("keywords") or [])
+    task_pattern = r"\bsegment(?:ation|ing|ed|er|ers)?\b|分割|勾画"
+    title_has_task = bool(re.search(task_pattern, title, re.I))
+    keywords_have_task = bool(re.search(task_pattern, keywords, re.I))
+    if re.search(r"\b(?:crop|plant|agricultur\w*|leaf|seedling)\b|作物|农作物|叶片", title, re.I):
+        return False
+    if not title_has_task and re.search(
+        r"\b(?:classification|diagnosis|encryption|reconstruction|registration|detection|fusion|quantification)\b"
+        r"|分类|诊断|加密|重建|配准|检测|融合", title, re.I
+    ):
+        return False
+    medical_context = medical_imaging_title_focus(title) or contains_any(
+        title + " " + keywords,
+        ("medical imag", "biomedical", "clinical", "radiolog", "ultrasound", "echocardi",
+         "patholog", "histolog", "tumor", "tumour", "lesion", "retina", "fundus",
+         "ophthalm", "abdomin", "brain", "stroke", "fetal", "cardiac",
+         "lung", "liver", "kidney", "breast", "prostate", "医学影像", "医学图像",
+         "病理", "肿瘤", "器官", "脑", "超声"),
+    )
+    return medical_context and (title_has_task or keywords_have_task)
+
+
+def industrial_few_shot_defect_paper(row: dict[str, Any], detail: dict[str, Any] | None) -> bool:
+    """Require the industrial defect task and a low-data method in one paper.
+
+    School-level OR searches also retrieve few-shot machine-fault diagnosis and
+    zero-shot industrial anomaly detection. Neither alone answers a request for
+    few-shot visual defect detection, so keep them as adjacent leads.
+    """
+    title = normalized_text((detail or {}).get("title") or row.get("title"))
+    keywords = normalized_text(" ".join(str(k) for k in (detail or {}).get("keywords") or []))
+    combined = title + " " + keywords
+    if "zero-shot" in title and not re.search(r"few[- ]shot|few[- ]data|small[- ]samples?", title):
+        return False
+    defect = bool(re.search(r"\b(?:defect|anomal(?:y|ies))\b|缺陷|异常检测", combined))
+    industrial = bool(re.search(
+        r"\b(?:industr\w*|manufactur\w*|surface|product|fabric|textile|steel|"
+        r"quality inspection|mvtec)\b|工业|制造|表面|产品|纺织|钢板|质量检测", combined))
+    low_data = bool(re.search(
+        r"\b(?:few[- ]shot|few[- ]data|small[- ]samples?|limited data|low[- ]shot|"
+        r"low[- ]data|one[- ]shot)\b|少样本|小样本|有限样本", combined))
+    return defect and industrial and low_data
+
+
 def fetch_paper_details(
     client: AMinerClient, paper_ids: list[str], max_details: int, warnings: list[str]
 ) -> dict[str, dict[str, Any]]:
@@ -396,6 +749,16 @@ def bounded_paper_ids(rows_by_term: list[list[dict[str, Any]]], limit: int) -> l
     return selected
 
 
+def ranked_abstract_ids(samples: list[list[dict[str, Any]]], limit: int) -> list[str]:
+    """Keep enough citation-ranked papers while reserving a few recent leads."""
+    if not samples:
+        return []
+    recent_reserve = min(6, limit // 4) if len(samples) > 1 else 0
+    cited = bounded_paper_ids(samples[:1], limit - recent_reserve)
+    recent = bounded_paper_ids(samples[1:], recent_reserve)
+    return list(dict.fromkeys([*cited, *recent]))[:limit]
+
+
 def resolve_people(
     client: AMinerClient,
     papers: list[dict[str, Any]],
@@ -411,6 +774,9 @@ def resolve_people(
     author_papers: dict[str, list[dict[str, Any]]] = defaultdict(list)
     author_affiliations: dict[str, set[str]] = defaultdict(set)
     author_org_ids: dict[str, set[str]] = defaultdict(set)
+    author_profile_ids: dict[str, set[str]] = defaultdict(set)
+    senior_authors: set[str] = set()
+    abstract_senior_authors: set[str] = set()
     skipped_without_org = 0
 
     for paper_id, row in paper_by_id.items():
@@ -418,6 +784,7 @@ def resolve_people(
         evidence = clean_paper(row, detail, direction_terms)
         if not evidence or not detail:
             continue
+        school_author_keys: list[str] = []
         for author in detail.get("authors") or []:
             if not isinstance(author, dict):
                 continue
@@ -435,17 +802,39 @@ def resolve_people(
                 skipped_without_org += 1
                 continue
             key = normalized_person_name(name)
+            school_author_keys.append(key)
             author_papers[key].append(evidence)
             if org_name:
                 author_affiliations[key].add(org_name)
             if org_id:
                 author_org_ids[key].add(org_id)
+            if author.get("id"):
+                author_profile_ids[key].add(str(author["id"]))
+        if school_author_keys:
+            senior_key = school_author_keys[-1]
+            senior_authors.add(senior_key)
+            if evidence.get("topic_evidence") == "abstract_only":
+                abstract_senior_authors.add(senior_key)
 
-    ordered_authors = sorted(
-        author_papers,
-        key=lambda key: (len({p["id"] for p in author_papers[key]}), max(p["year"] for p in author_papers[key])),
-        reverse=True,
-    )
+    def author_priority(key: str) -> tuple[int, int, int, int, int]:
+        papers = author_papers[key]
+        strength = max({"title": 2, "keywords": 1}.get(p.get("topic_evidence"), 0) for p in papers)
+        citation_floors = [int(match.group()) for p in papers
+                           if (match := re.search(r"\d+", str(p.get("n_citation_bucket") or "")))]
+        return (strength, int(bool(author_profile_ids[key])), max(citation_floors, default=0),
+                len({p["id"] for p in papers}), max(p["year"] for p in papers))
+
+    ordered_authors = sorted(author_papers, key=author_priority, reverse=True)
+    # First/last authorship does not prove a faculty role, but sampling the
+    # last school-affiliated author stops large-team papers from filling the
+    # lookup cap with students before a likely supervising author is checked.
+    senior_quota = max_author_lookups // 3
+    abstract_quota = max_author_lookups // 6
+    selected_authors = list(dict.fromkeys([
+        *sorted(senior_authors, key=author_priority, reverse=True)[:senior_quota],
+        *sorted(abstract_senior_authors, key=author_priority, reverse=True)[:abstract_quota],
+        *ordered_authors,
+    ]))[:max_author_lookups]
     if len(ordered_authors) > max_author_lookups:
         warnings.append(f"author lookup cap omitted {len(ordered_authors) - max_author_lookups} organization-matched authors")
     if skipped_without_org:
@@ -456,7 +845,6 @@ def resolve_people(
 
     by_id: dict[str, Candidate] = {}
     fallback_count = 0
-    selected_authors = ordered_authors[:max_author_lookups]
     def lookup_author(author_key: str) -> tuple[str, str, list[dict[str, Any]], str, int]:
         display_name = next(
             str(author.get("name"))
@@ -482,17 +870,29 @@ def resolve_people(
             ]
 
         org_people = school_profile_rows(people)
-        if not org_people:
+        author_ids = author_profile_ids[author_key]
+        if not org_people or (author_ids and not any(
+            str(row.get("id") or "") in author_ids for row in org_people
+        )):
             # The server-side school-level org_id filter excludes department-level
-            # profiles entirely; retry by organization text (person_search is free).
-            people = unwrap(
+            # profiles even when it returns other same-name scholars. Retry by
+            # organization text whenever the paper's exact author ID is absent.
+            text_people = unwrap(
                 client.call("person_search", {"name": query_name, "org": organization.canonical_name, "size": 10})
             )
+            people = list({str(row.get("id") or ""): row for row in [*people, *text_people]
+                           if row.get("id")}.values())
             org_people = school_profile_rows(people)
         exact_people = [
             row for row in org_people
             if author_key in (normalized_person_name(row.get("name")), normalized_person_name(row.get("name_zh")))
         ]
+        # paper_detail may give the exact AMiner author ID. When name search
+        # yields multiple same-name profiles, use that ID only if its profile
+        # also passes the school and exact-name checks above.
+        linked = [row for row in exact_people if str(row.get("id") or "") in author_profile_ids[author_key]]
+        if len(linked) == 1:
+            exact_people = linked
         resolution = "org_constrained_exact_name"
         fallback_used = 0
         if not exact_people and allow_name_fallback:
@@ -560,7 +960,7 @@ def classify_org(name: str) -> str:
         "company", "corporation", "corp", "inc", "ltd", "laboratories", "microsoft", "google",
         "meta", "alibaba", "tencent", "huawei", "bytedance", "字节", "腾讯", "阿里", "华为", "百度", "商汤", "旷视",
     )
-    academic_terms = ("university", "college", "institute", "academy", "school", "大学", "学院", "研究院", "科学院", "实验室")
+    academic_terms = ("university", "univ", "college", "institute", "academy", "school", "大学", "学院", "研究院", "科学院", "实验室")
     def classification_match(term: str) -> bool:
         normalized = normalized_text(term)
         if normalized.isascii():
@@ -578,13 +978,13 @@ def is_university_affiliation(name: str) -> bool:
     """Conservative distinction between a university and another academic institute."""
     value = normalized_text(name)
     return "大学" in value or bool(re.search(
-        r"\b(universit\w*|college|institute of technology|polytechnic)\b", value
+        r"\b(universit\w*|univ|college|institute of technology|polytechnic)\b", value
     ))
 
 
 def enrich_collaboration(
     client: AMinerClient, candidates: dict[str, Candidate], details: dict[str, dict[str, Any]],
-    warnings: list[str],
+    warnings: list[str], home_organization: ResolvedOrganization | None = None,
 ) -> None:
     candidate_names: dict[str, list[Candidate]] = defaultdict(list)
     for candidate in candidates.values():
@@ -604,9 +1004,21 @@ def enrich_collaboration(
                 # Authors without an orgid get a "name:" pseudo-key so they are never
                 # sent to org_detail as if the display name were an organization ID.
                 org_id = str(author.get("orgid") or "") or f"name:{normalized_text(org_name)}"
-                if not org_name or (candidate.org_id and org_id == candidate.org_id):
+                if not org_name:
+                    continue
+                # Some paper records put the university-level ID on an author
+                # while the profile uses a department ID. Compare the explicit
+                # affiliation text too, so home departments are not partners.
+                if home_organization and contains_any(
+                    org_name, [home_organization.query, home_organization.canonical_name,
+                               *home_organization.aliases]
+                ):
+                    continue
+                if not home_organization and candidate.org_id and org_id == candidate.org_id:
                     continue
                 candidate.collaboration_orgs[org_id] = org_name
+                if detail.get("id"):
+                    candidate.collaboration_papers.setdefault(org_id, set()).add(str(detail["id"]))
 
     org_ids = list(dict.fromkeys(
         org_id for candidate in candidates.values() for org_id in candidate.collaboration_orgs
@@ -636,6 +1048,68 @@ def enrich_collaboration(
         }
 
 
+def supplement_collaboration_papers(
+    client: AMinerClient, candidates: dict[str, Candidate],
+    details: dict[str, dict[str, Any]], organization: ResolvedOrganization,
+    terms: list[str], warnings: list[str],
+) -> None:
+    """Recover partner papers hidden beyond institution-scoped topic samples.
+
+    Search a few exact scholar names without an org-string filter, then demand
+    the selected person ID and university affiliation in paper_detail. This
+    widens recall without converting a same-name paper into collaboration.
+    """
+    eligible = [c for c in candidates.values() if not c.identity_ambiguous
+                and not c.person_id.startswith("unresolved:") and c.name]
+    eligible.sort(key=lambda c: (
+        sum(p.get("topic_evidence") in {"title", "keywords"} for p in c.papers.values()),
+        c.n_citation or 0), reverse=True)
+    selected = eligible[:6]
+    focus = [term for term in terms if re.search(r"[a-z]", term, re.I)][:4]
+    if not selected or not focus:
+        return
+    rows_by_id: dict[str, dict[str, Any]] = {}
+    owners: dict[str, set[str]] = defaultdict(set)
+    for candidate in selected:
+        for term in focus:
+            try:
+                rows = unwrap(client.call("paper_search_pro", {
+                    "author": candidate.name, "query": term, "order": "n_citation",
+                    "page": 0, "size": 12, "year_from": CURRENT_YEAR - 5,
+                    "year_to": CURRENT_YEAR,
+                }))
+            except AMinerAPIError as exc:
+                warnings.append(f"{candidate.display_name}: collaboration author pass {term} failed ({exc.message})")
+                continue
+            for row in rows[:3]:
+                paper_id = str(row.get("id") or "")
+                if not paper_id or paper_id in candidate.papers or len(rows_by_id) >= 72:
+                    continue
+                rows_by_id.setdefault(paper_id, row)
+                owners[paper_id].add(candidate.person_id)
+    fetched = fetch_paper_details(client, list(rows_by_id), 72, warnings)
+    school_names = [organization.query, organization.canonical_name, *organization.aliases]
+    added = 0
+    for paper_id, detail in fetched.items():
+        for candidate_id in owners[paper_id]:
+            candidate = candidates[candidate_id]
+            own_author = next((author for author in detail.get("authors") or []
+                               if isinstance(author, dict)
+                               and str(author.get("id") or "") == candidate.person_id
+                               and (str(author.get("orgid") or "") == organization.org_id
+                                    or contains_any(str(author.get("org") or ""), school_names))), None)
+            if own_author is None:
+                continue
+            evidence = clean_paper(rows_by_id[paper_id], detail, terms)
+            if evidence is None:
+                continue
+            candidate.papers[paper_id] = evidence
+            details[paper_id] = detail
+            added += 1
+    if added:
+        warnings.append(f"author-and-university-verified collaboration pass added {added} direction-paper attribution(s)")
+
+
 def score_candidates(
     candidates: dict[str, Candidate], direction_terms: list[str], school: str, department: str, profile: dict[str, Any] | None
 ) -> None:
@@ -646,7 +1120,11 @@ def score_candidates(
     profile_tokens = tokens(profile_text)
     for candidate in candidates.values():
         matched_papers = [paper for paper in candidate.papers.values() if paper.get("direction_term_match")]
-        direction_score = min(100.0, 50.0 + 15.0 * len(matched_papers) + 5.0 * len({t for p in matched_papers for t in p.get("matched_terms", [])}))
+        direct_papers = [paper for paper in matched_papers
+                         if paper.get("topic_evidence") in {"title", "keywords"}]
+        direction_score = min(100.0, 35.0 + 20.0 * len(direct_papers)
+                              + 5.0 * (len(matched_papers) - len(direct_papers))
+                              + 5.0 * len({t for p in matched_papers for t in p.get("matched_terms", [])}))
         recent = [p for p in matched_papers if int(p["year"]) >= CURRENT_YEAR - 5]
         activity_score = min(100.0, len(recent) * 25.0)
         affiliation_text = " ".join([candidate.org, candidate.org_zh, *candidate.author_affiliations])
@@ -686,8 +1164,15 @@ def filter_discipline_conflicts(
     kept: dict[str, Candidate] = {}
     removed: list[str] = []
     for person_id, candidate in candidates.items():
-        affiliation = " ".join([candidate.org, candidate.org_zh, *candidate.author_affiliations])
-        if contains_any(affiliation, CROSS_DISCIPLINE_AFFILIATION_TERMS):
+        primary = [value for value in (candidate.org, candidate.org_zh) if value]
+        # A single paper may carry an old or joint hospital/chemistry affiliation.
+        # It must not veto an exact scholar profile at a computing faculty.
+        primary_on_field = any(contains_any(value, COMPUTING_AFFILIATION_TERMS) for value in primary)
+        primary_off_field = any(contains_any(value, CROSS_DISCIPLINE_AFFILIATION_TERMS) for value in primary)
+        all_paper_affiliations_off_field = bool(candidate.author_affiliations) and all(
+            contains_any(value, CROSS_DISCIPLINE_AFFILIATION_TERMS)
+            for value in candidate.author_affiliations)
+        if not primary_on_field and (primary_off_field or all_paper_affiliations_off_field):
             removed.append(f"{candidate.display_name} ({candidate.org_zh or candidate.org})")
         else:
             kept[person_id] = candidate
@@ -1019,7 +1504,7 @@ def select_profile_portfolio(candidates: list[Candidate], limit: int,
 
 
 def school_research_leads(candidates: list[Candidate], schools: list[str],
-                          per_school_limit: int = 3) -> dict[str, list[dict[str, Any]]]:
+                          per_school_limit: int = 5) -> dict[str, list[dict[str, Any]]]:
     """Keep a small, explicitly unverified search pool visible for every school.
 
     The overall portfolio can hide a school's second or third candidate. These
@@ -1030,8 +1515,22 @@ def school_research_leads(candidates: list[Candidate], schools: list[str],
         rows = [candidate for candidate in candidates if school in candidate.source_schools]
         chosen: list[tuple[Candidate, dict[str, Any] | None]] = []
         seen_papers: set[str] = set()
-        for distinct_paper_only in (True, False):
-            for candidate in rows:
+        citation_rows = sorted(
+            (row for row in rows if not row.identity_ambiguous and row.n_citation is not None
+             and any(p.get("topic_evidence") in {"title", "keywords"} for p in row.papers.values())),
+            key=lambda row: row.n_citation or 0, reverse=True,
+        )
+        # Surface a school's strong but low-scoring senior scholar as a lead;
+        # broad portfolio scores otherwise hide a one-paper field landmark.
+        # Citation volume never verifies faculty status or task fit.
+        for pool, quota, distinct_paper_only in (
+            (rows, min(3, per_school_limit), True),
+            (citation_rows, per_school_limit, False),
+            (rows, per_school_limit, False),
+        ):
+            for candidate in pool:
+                if len(chosen) >= quota:
+                    break
                 if any(existing.person_id == candidate.person_id for existing, _ in chosen):
                     continue
                 first_paper = next((paper for paper in candidate.papers.values()
@@ -1042,10 +1541,8 @@ def school_research_leads(candidates: list[Candidate], schools: list[str],
                 chosen.append((candidate, first_paper))
                 if paper_key:
                     seen_papers.add(paper_key)
-                if len(chosen) >= per_school_limit:
+                if len(chosen) >= quota:
                     break
-            if len(chosen) >= per_school_limit:
-                break
         result[school] = [{
             "name": candidate.display_name,
             "person_id": candidate.person_id,
@@ -1105,7 +1602,29 @@ def build_rank_key(mode: str, collaboration_type: str, rank_by: str):
             count = len(candidate.collaboration_orgs) if collaboration_type == "all" else sum(
                 value == collaboration_type for value in candidate.collaboration_types.values()
             )
-            return (float(count), overall)
+            partner_papers = set().union(*(
+                candidate.collaboration_papers.get(org_id, set())
+                for org_id in candidate.collaboration_orgs
+                if collaboration_type == "all" or candidate.collaboration_types.get(org_id) == collaboration_type
+            ))
+            independent_papers = len(partner_papers)
+            direct = sum(paper.get("topic_evidence") in {"title", "keywords"}
+                         for paper in candidate.papers.values())
+            if rank_by == "citation":
+                return (float(candidate.n_citation or 0), float(direct > 0),
+                        float(independent_papers), float(count), overall)
+            if rank_by == "recent":
+                recent = sum(int(paper.get("year") or 0) >= CURRENT_YEAR - 3
+                             for paper in candidate.papers.values())
+                return (float(direct > 0), float(recent), float(independent_papers),
+                        float(count), overall)
+            if rank_by == "rising":
+                recent = min(3, sum(int(paper.get("year") or 0) >= CURRENT_YEAR - 3
+                                    for paper in candidate.papers.values()))
+                return (float(direct > 0), float(recent), -float(candidate.n_citation or 0),
+                        float(independent_papers), float(count), overall)
+            return (float(direct > 0), float(independent_papers >= 2),
+                    float(independent_papers), float(count), overall)
         years = [int(paper["year"]) for paper in candidate.papers.values()]
         if rank_by == "citation":
             return (float(candidate.n_citation or 0), overall)
@@ -1122,6 +1641,82 @@ def build_rank_key(mode: str, collaboration_type: str, rank_by: str):
     return rank_key
 
 
+def collaboration_alternate_leads(
+    candidates: list[Candidate], displayed: list[Candidate], limit: int = 6,
+) -> list[dict[str, Any]]:
+    """Expose established authors hidden by single-paper coauthor-count rank.
+
+    Citation count is only a discovery signal. These rows still need an official
+    faculty/degree check and individual collaboration-paper verification.
+    """
+    shown = {candidate.person_id for candidate in displayed}
+    eligible = [candidate for candidate in candidates
+                if candidate.person_id not in shown and not candidate.identity_ambiguous
+                and any(paper.get("topic_evidence") in {"title", "keywords"}
+                        for paper in candidate.papers.values())
+                and isinstance(candidate.n_citation, int)]
+    selected = sorted(eligible, key=lambda candidate: candidate.n_citation or 0, reverse=True)[:limit]
+    return [{
+        "name": candidate.display_name,
+        "person_id": candidate.person_id,
+        "aminer_url": f"https://www.aminer.cn/profile/{candidate.person_id}",
+        "n_citation": candidate.n_citation,
+        "evidence_papers": [
+            {key: paper.get(key) for key in ("id", "title", "year", "aminer_url")}
+            for paper in list(candidate.papers.values())[:2]
+        ],
+        "observed_partner_organizations": len(candidate.collaboration_orgs),
+        "status": "exploratory research lead; current faculty, degree role and collaboration breadth unverified",
+    } for candidate in selected]
+
+
+def task_specific_alternate_leads(
+    candidates: list[Candidate], displayed: list[Candidate], schools: list[str],
+    direction_terms: list[str], per_school_limit: int = 2,
+) -> dict[str, list[dict[str, Any]]]:
+    """Surface exact task specialists hidden by a broad portfolio score.
+
+    A coauthor with one direct paper and several precise interest tags can rank
+    below a prolific broad-field author. These are discovery leads, not verified
+    faculty or degree supervisors.
+    """
+    shown = {candidate.person_id for candidate in displayed}
+    generic_terms = {"vision", "computer vision", "deep learning", "machine learning",
+                     "artificial intelligence", "ai", "机器人", "人工智能", "深度学习",
+                     "计算机视觉", "图像", "多模态"}
+    specific_focus = [term for term in direction_terms[1:]
+                      if term.strip().casefold() not in generic_terms]
+    focus = specific_focus or direction_terms[1:] or direction_terms
+    result: dict[str, list[dict[str, Any]]] = {}
+    for school in schools:
+        ranked: list[tuple[float, int, Candidate]] = []
+        for candidate in candidates:
+            if school not in candidate.source_schools or candidate.person_id in shown or candidate.identity_ambiguous:
+                continue
+            if not any(p.get("topic_evidence") in {"title", "keywords"} for p in candidate.papers.values()):
+                continue
+            matching_interests = [interest for interest in candidate.interests
+                                  if contains_any(interest, focus)]
+            if not matching_interests:
+                continue
+            ranked.append((len(matching_interests) / max(1, len(candidate.interests)),
+                           len(matching_interests), candidate))
+        ranked.sort(key=lambda item: (item[0], item[1], item[2].scores.get("overall") or 0), reverse=True)
+        result[school] = [{
+            "name": candidate.display_name,
+            "person_id": candidate.person_id,
+            "aminer_url": f"https://www.aminer.cn/profile/{candidate.person_id}",
+            "matching_interests": [interest for interest in candidate.interests
+                                   if contains_any(interest, focus)][:4],
+            "evidence_paper": next(({
+                key: paper.get(key) for key in ("id", "title", "year", "aminer_url")
+            } for paper in candidate.papers.values()
+                if paper.get("topic_evidence") in {"title", "keywords"}), None),
+            "status": "task-specific research lead; current faculty and requested degree role require official proof",
+        } for _, _, candidate in ranked[:per_school_limit]]
+    return result
+
+
 def estimate_cost(
     mode: str, school_count: int, alias_count: int, paper_limit: int, verify_roles: int,
     profile_discovery: bool = False, discovery_alias_count: int = 0,
@@ -1133,13 +1728,23 @@ def estimate_cost(
     qa_search_calls = (2 * search_calls if mode == "discover" and school_count else search_calls)
     if mode == "discover" and not school_count:
         qa_search_calls = 0
+    if mode == "discover" and school_count:
+        qa_search_calls += school_count  # possible medical-image topic breadth pass
     if mode in {"profile", "collaboration"} and school_count:
         qa_search_calls += school_count * (min(2, alias_count - 1) if alias_count > 1 else 1)
     pro_search_calls = (2 * search_calls if mode != "discover" or school_count else search_calls) + global_search_calls
-    details_per_school = (min(24, max(12, 3 * paper_limit)) if mode == "collaboration"
-                          else min(15, max(8, 2 * paper_limit)))
-    detail_calls = ((school_count * (min(16, max(8, 2 * paper_limit)) if mode == "discover" else 2 * details_per_school))
+    if mode == "discover" and school_count:
+        pro_search_calls += 6 * school_count  # abstract/title views plus possible keyword breadth pass
+    if mode in {"named", "tier", "collaboration", "profile"}:
+        pro_search_calls += (8 if mode == "collaboration" else 6) * school_count
+    details_per_school = 84
+    alias_probe_details = 3 if mode in {"named", "tier", "collaboration", "profile"} else 0
+    detail_calls = ((school_count * (min(36, max(16, 4 * paper_limit)) if mode == "discover"
+                                     else 2 * details_per_school + alias_probe_details))
                     if school_count else alias_count * paper_limit)
+    if mode == "collaboration":
+        pro_search_calls += 24 * school_count  # six exact scholars, four branch terms
+        detail_calls += 72 * school_count     # bounded author-and-school checks
     org_search_calls = school_count
     # Collaboration enrichment and role verification run independently for each school.
     # Discover currently aggregates author affiliations directly and does not call org_detail.
@@ -1177,10 +1782,17 @@ def estimate_person_cost(name_count: int, paper_limit: int, deep: bool, focus_al
     cost += name_count * int(deep) * API_SPEC["person_detail"][2]
     if broad_context and focus_alias_count:
         cost += name_count * (2 * API_SPEC["paper_search_pro"][2]
-                              + 40 * API_SPEC["paper_detail"][2])
+                              + 40 * API_SPEC["paper_detail"][2]
+                              + API_SPEC["paper_qa_search"][2])
         searches += 2
         detail_calls += name_count * 40
+        # Robotics field recall adds at most three searches and 24 checks.
+        cost += name_count * (3 * API_SPEC["paper_search_pro"][2]
+                              + 24 * API_SPEC["paper_detail"][2])
+        searches += 3
+        detail_calls += name_count * 24
     return {"worst_case_cny": round(cost, 2), "paper_search_pro_calls": name_count * searches,
+            "paper_qa_search_calls": name_count if broad_context and focus_alias_count else 0,
             "paper_detail_calls": detail_calls, "person_paper_relation_calls": relation_calls,
             "person_detail_calls": name_count * int(deep)}
 
@@ -1398,6 +2010,15 @@ def recommend_for_school(
         warnings.append(f"organization not found in AMiner: {school}; try an official English name or discover mode")
         return {}
     terms = school_search_terms(direction, aliases, profile)
+    # Limit paid QA queries, not the vocabulary used to judge retrieved papers.
+    # The first three aliases can omit a genuine subfield (e.g. navigation in an
+    # embodied-intelligence request), silently deleting its authors after recall.
+    evidence_terms = direction_aliases(direction, aliases)
+    if include_collaboration and ("embodied" in normalized_text(direction) or "具身智能" in direction):
+        # The broad keyword pass can recover a genuinely embodied-agent paper
+        # titled without the literal phrase "embodied intelligence". Retain its
+        # explicit subfield phrase through the downstream topic check.
+        evidence_terms = direction_aliases(direction, [*aliases, "embodied agent"])
     search_rows: dict[str, dict[str, Any]] = {}
     rows_by_term: list[list[dict[str, Any]]] = []
     for term in terms:
@@ -1429,9 +2050,31 @@ def recommend_for_school(
             for row in term_rows:
                 if row.get("id"):
                     search_rows[str(row["id"])] = row
-    detail_cap = (min(24, max(12, 3 * paper_limit)) if include_collaboration
-                  else min(15, max(8, 2 * paper_limit)))
-    selected_ids = bounded_paper_ids(rows_by_term, detail_cap)
+    learn_english_school_alias(client, organization, rows_by_term, warnings)
+    title_samples = complementary_title_search(client, organization, evidence_terms, warnings,
+                                                keep_primary_broad=include_collaboration)
+    abstract_samples = complementary_abstract_search(client, organization, evidence_terms, warnings)
+    for sample in title_samples:
+        for row in sample:
+            if row.get("id"):
+                search_rows.setdefault(str(row["id"]), row)
+    for sample in abstract_samples:
+        for row in sample:
+            if row.get("id"):
+                search_rows.setdefault(str(row["id"]), row)
+    detail_cap = 84
+    # Reserve independent inspection slots for all three retrieval paths.
+    title_limit = 40
+    abstract_limit = 26
+    qa_limit = detail_cap - title_limit - abstract_limit
+    primary_count = 30
+    title_ids = list(dict.fromkeys(
+        [*bounded_paper_ids(title_samples[:1], primary_count),
+         *bounded_paper_ids(title_samples[1:], title_limit)]
+    ))[:title_limit]
+    abstract_ids = ranked_abstract_ids(abstract_samples, abstract_limit)
+    qa_ids = bounded_paper_ids(rows_by_term, qa_limit)
+    selected_ids = list(dict.fromkeys([*title_ids, *abstract_ids, *qa_ids]))[:detail_cap]
     if len(search_rows) > len(selected_ids):
         warnings.append(f"{school}: inspected {len(selected_ids)} of {len(search_rows)} matched papers across direction terms")
     info = batch_paper_info(client, selected_ids, warnings)
@@ -1439,7 +2082,7 @@ def recommend_for_school(
     details = fetch_paper_details(client, selected_ids, detail_cap, warnings)
     papers = [dict(search_rows[paper_id], **info_by_id.get(paper_id, {})) for paper_id in selected_ids]
     candidates = resolve_people(
-        client, papers, details, organization, terms, max_author_lookups, allow_name_fallback, warnings
+        client, papers, details, organization, evidence_terms, max_author_lookups, allow_name_fallback, warnings
     )
     # One bounded global pass is enough to recover useful authors when the
     # institution-scoped sample is sparse. Identity is still checked below.
@@ -1465,7 +2108,7 @@ def recommend_for_school(
             g_details.update(fetch_paper_details(client, new_ids, detail_cap, warnings))
             g_papers = [dict(global_rows[pid], **g_info_by_id.get(pid, {})) for pid in selected_ids + new_ids]
             g_candidates = resolve_people(
-                client, g_papers, g_details, organization, terms, max_author_lookups,
+                client, g_papers, g_details, organization, evidence_terms, max_author_lookups,
                 allow_name_fallback, warnings,
             )
             details = g_details
@@ -1481,22 +2124,23 @@ def recommend_for_school(
                 )
     for candidate in candidates.values():
         candidate.source_schools.add(school)
-    candidates = filter_discipline_conflicts(candidates, terms, allow_cross_discipline, warnings)
+    candidates = filter_discipline_conflicts(candidates, evidence_terms, allow_cross_discipline, warnings)
     if not allow_cross_discipline:
-        candidates = filter_by_interest_mismatch(candidates, terms, warnings)
+        candidates = filter_by_interest_mismatch(candidates, evidence_terms, warnings)
     if roster_pages:
         augment_from_roster(
-            client, organization, terms, candidates, warnings,
+            client, organization, evidence_terms, candidates, warnings,
             max_pages=roster_pages, direction_evidence=False,
         )
         for candidate in candidates.values():
             candidate.source_schools.add(school)
     if include_collaboration:
-        enrich_collaboration(client, candidates, details, warnings)
-    score_candidates(candidates, terms, school, department, profile)
+        supplement_collaboration_papers(client, candidates, details, organization, evidence_terms, warnings)
+        enrich_collaboration(client, candidates, details, warnings, organization)
+    score_candidates(candidates, evidence_terms, school, department, profile)
     if verify_roles:
         verify_candidate_roles(client, candidates, verify_roles, warnings, hired_since, with_portrait)
-        score_candidates(candidates, terms, school, department, profile)
+        score_candidates(candidates, evidence_terms, school, department, profile)
     return candidates
 
 
@@ -1507,7 +2151,7 @@ def discover_institutions(
     terms = direction_aliases(direction, aliases)[:6]
     if schools:
         compared: list[dict[str, Any]] = []
-        detail_cap = min(16, max(8, 2 * paper_limit))
+        detail_cap = min(36, max(16, 4 * paper_limit))
         representative_limit, recent_example_limit = (2, 1) if len(schools) >= 9 else (3, 2)
         multimodal_llm_focus = any(contains_any(term, ("multimodal large language model", "多模态大模型"))
                                    for term in terms)
@@ -1517,6 +2161,19 @@ def discover_institutions(
         # affect local evidence matching, not the paid search-query budget.
         evidence_terms = [*terms, "multimodal", "vlm", "visual-linguistic", "vision-language"] \
             if multimodal_llm_focus else terms
+        medical_image_focus = any("medical imag" in term.lower() or "医学影像" in term
+                                  for term in terms)
+        medical_segmentation_focus = medical_image_focus and contains_any(
+            direction, ("segmentation", "segmenting", "分割", "勾画"))
+        industrial_few_shot_focus = (
+            any(contains_any(term, ("defect detection", "industrial anomaly detection", "缺陷检测"))
+                for term in terms)
+            and any(contains_any(term, ("few-shot", "few shot", "few-data", "少样本", "小样本"))
+                    for term in terms)
+        )
+        abstract_seed = "medical image" if medical_image_focus else discovery_abstract_seed(terms)
+        if abstract_seed and abstract_seed not in evidence_terms:
+            evidence_terms = [*evidence_terms, abstract_seed]
         for school in schools:
             organization = resolve_organization(client, school)
             if organization is None:
@@ -1556,7 +2213,78 @@ def discover_institutions(
                         stored = search_rows.setdefault(paper_id, dict(row))
                         if row.get("n_citation_bucket"):
                             stored["n_citation_bucket"] = row["n_citation_bucket"]
-            selected_ids = bounded_paper_ids(rows_by_term, detail_cap)
+            abstract_samples = complementary_abstract_search(
+                client, organization, [abstract_seed] if abstract_seed else [], warnings)
+            for sample in abstract_samples:
+                for row in sample:
+                    if row.get("id"):
+                        search_rows.setdefault(str(row["id"]), row)
+            title_samples = [] if medical_image_focus else complementary_title_search(
+                client, organization, terms, warnings)
+            for sample in title_samples:
+                for row in sample:
+                    if row.get("id"):
+                        search_rows.setdefault(str(row["id"]), row)
+            keyword_rows: list[dict[str, Any]] = []
+            recent_topic_rows: list[dict[str, Any]] = []
+            keyword_total_hits: int | None = None
+            recent_topic_total_hits: int | None = None
+            if medical_image_focus:
+                # The general academic workflow exposes broader school-level
+                # totals and highly cited papers that a short org-ID QA head
+                # sample can miss. These totals are fuzzy retrieval signals;
+                # only inspected author affiliations count as evidence below.
+                try:
+                    payload = client.call("paper_search_pro", {
+                        "keyword": "medical image", "org": organization.canonical_name,
+                        "size": 30, "page": 0, "order": "n_citation",
+                    })
+                    keyword_total_hits = payload.get("total") if isinstance(payload.get("total"), int) else None
+                    keyword_rows = [row for row in unwrap(payload) if isinstance(row.get("year"), int)
+                                    and CURRENT_YEAR - 5 <= row["year"] <= CURRENT_YEAR]
+                except AMinerAPIError as exc:
+                    warnings.append(f"{school}: keyword school breadth search failed ({exc.message})")
+                topic_groups = json.dumps([
+                    ["medical image", "medical imaging"],
+                    ["deep learning", "neural network", "machine learning", "artificial intelligence"],
+                ])
+                try:
+                    payload = client.call("paper_qa_search", {
+                        "use_topic": True, "topic_high": topic_groups,
+                        "org_id": [organization.org_id],
+                        "year": list(range(CURRENT_YEAR - 3, CURRENT_YEAR + 1)),
+                        "size": 20, "force_year_sort": True,
+                    })
+                    recent_topic_total_hits = payload.get("total") if isinstance(payload.get("total"), int) else None
+                    recent_topic_rows = [row for row in unwrap(payload) if isinstance(row.get("year"), int)
+                                         and CURRENT_YEAR - 5 <= row["year"] <= CURRENT_YEAR]
+                except AMinerAPIError as exc:
+                    warnings.append(f"{school}: recent topic breadth search failed ({exc.message})")
+                for row in [*keyword_rows, *recent_topic_rows]:
+                    if row.get("id"):
+                        search_rows.setdefault(str(row["id"]), row)
+            if medical_image_focus:
+                selected_ids = list(dict.fromkeys([
+                    *bounded_paper_ids([keyword_rows], min(8, detail_cap // 4)),
+                    *bounded_paper_ids([recent_topic_rows], min(8, detail_cap // 4)),
+                    *ranked_abstract_ids(abstract_samples, min(12, detail_cap // 3)),
+                    *bounded_paper_ids(rows_by_term, detail_cap),
+                ]))[:detail_cap]
+            else:
+                title_limit = min(12, detail_cap // 3)
+                abstract_limit = min(8, detail_cap // 4)
+                # Draw QA up to the full cap so sparse title/abstract views do
+                # not leave detail slots idle and lose otherwise reachable work.
+                # The multimodal-LLM branch has an additional direct-topic
+                # ordering and must retain its smaller QA quota: generic LLM
+                # papers can otherwise consume the remaining sample.
+                qa_limit = (detail_cap - title_limit - abstract_limit
+                            if multimodal_llm_focus else detail_cap)
+                selected_ids = list(dict.fromkeys([
+                    *bounded_paper_ids(title_samples, title_limit),
+                    *ranked_abstract_ids(abstract_samples, abstract_limit),
+                    *bounded_paper_ids(rows_by_term, qa_limit),
+                ]))[:detail_cap]
             info_by_id = {str(row.get("id")): row for row in batch_paper_info(client, selected_ids, warnings)
                           if row.get("id")}
             details = fetch_paper_details(client, selected_ids, detail_cap, warnings)
@@ -1587,6 +2315,18 @@ def discover_institutions(
                     continue
                 if cleaned["topic_evidence"] == "abstract_only":
                     weak_topic.append(cleaned)
+                elif medical_segmentation_focus and not medical_segmentation_paper(merged, detail):
+                    adjacent_topic.append(cleaned)
+                elif industrial_few_shot_focus and not industrial_few_shot_defect_paper(merged, detail):
+                    adjacent_topic.append(cleaned)
+                elif medical_image_focus and cleaned["topic_evidence"] == "keywords" \
+                        and not medical_imaging_title_focus(cleaned["title"]) \
+                        and not contains_any(" ".join(str(k) for k in (detail or {}).get("keywords") or []), (
+                            "medical image segmentation", "medical image classification",
+                            "medical image reconstruction", "medical image registration",
+                            "medical image detection", "computer-aided diagnosis",
+                        )):
+                    adjacent_topic.append(cleaned)
                 elif multimodal_llm_focus and not multimodal_llm_paper(merged, detail):
                     adjacent_topic.append(cleaned)
                 else:
@@ -1609,8 +2349,11 @@ def discover_institutions(
             recent_count = sum(paper["year"] >= CURRENT_YEAR - 2 for paper in unique_evidence)
             influential_count = sum(citation_floor(paper) >= 201 for paper in unique_evidence)
             flagship_count = sum(citation_floor(paper) >= 1001 for paper in unique_evidence)
-            compared.append({"organization": organization.canonical_name,
+            compared.append({"organization": school,
+                             "aminer_organization_name": organization.canonical_name,
                              "organization_id": organization.org_id,
+                             "keyword_total_hits": keyword_total_hits,
+                             "recent_topic_total_hits": recent_topic_total_hits,
                              "matched_paper_count": len(unique_evidence),
                              "recent_direction_paper_count": recent_count,
                              "influential_direction_paper_count": influential_count,
@@ -1620,6 +2363,8 @@ def discover_institutions(
                              "affiliation_conflicts": affiliation_conflicts,
                              "abstract_only_paper_count": len(weak_topic),
                              "adjacent_topic_paper_count": len(adjacent_topic),
+                             "compound_focus": "industrial defect detection AND few-shot visual learning"
+                             if industrial_few_shot_focus else None,
                              "representative_papers": representative,
                              "evidence_papers": recent_examples,
                              "evidence_papers_omitted_count": len(unique_evidence) - len(representative) - len(recent_examples),
@@ -1661,6 +2406,39 @@ def discover_institutions(
     ]
 
 
+def mentor_followup_plan(schools: list[str], institutions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Expose low-yield school samples that still merit person-level recall.
+
+    The bounded paper inspection can miss a school's best-matching faculty. A large
+    search pool with few verified sampled titles signals uncertainty, not a
+    negative result, so these schools should not vanish before mentor search.
+    """
+    rows = []
+    for school, institution in zip(schools, institutions):
+        if institution.get("coverage") != "bounded_org_id_sample":
+            continue
+        rows.append({"school": school,
+                     "matched_paper_count": int(institution.get("matched_paper_count") or 0),
+                     "search_hit_count": int(institution.get("search_hit_count") or 0),
+                     "inspected_paper_count": int(institution.get("inspected_paper_count") or 0)})
+    if not rows:
+        return {"thin_sample_schools": [], "minimum_thin_sample_probes": 0}
+    counts = sorted(row["matched_paper_count"] for row in rows)
+    cutoff = counts[max(0, len(counts) // 3 - 1)]
+    thin = [row for row in rows
+            if row["matched_paper_count"] <= cutoff and row["search_hit_count"] >= 20]
+    thin.sort(key=lambda row: (row["search_hit_count"],
+                               -row["matched_paper_count"]), reverse=True)
+    return {
+        "thin_sample_schools": thin,
+        "minimum_thin_sample_probes": min(2, len(thin)) if len(rows) > 5 else 0,
+        "note": "These schools had many retrieved hits but few verified titles in a bounded sample. "
+                "Before selecting five schools, run named-school mentor searches on at least the "
+                "indicated number; include a zero-count school when present. A low count is not "
+                "evidence that no directly fitting faculty member exists.",
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", required=True, choices=("named", "tier", "collaboration", "profile", "discover", "person"))
@@ -1678,7 +2456,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--paper-limit", type=int, default=10)
     parser.add_argument("--candidate-limit", type=int, default=10)
     parser.add_argument("--max-schools", type=int, default=5)
-    parser.add_argument("--max-author-lookups", type=int, default=12)
+    parser.add_argument("--max-author-lookups", type=int, default=40)
     parser.add_argument("--collaboration-type", choices=("all", "academic", "industry"), default="all")
     parser.add_argument(
         "--rank-by", choices=("overall", "citation", "recent", "rising"), default="overall",
@@ -1714,14 +2492,62 @@ def write_result(result: dict[str, Any], output: Path | None) -> None:
     # Multi-school discovery can exceed a model tool-result window even though
     # the actual evidence is bounded. Keep saved artifacts readable and use a
     # slightly tighter, still line-broken representation on stdout.
-    indent = 2 if output or result.get("workflow") != "discover" else 1
-    rendered = json.dumps(result, ensure_ascii=False, indent=indent) + "\n"
     if output:
+        rendered = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(rendered, encoding="utf-8")
-        print(f"Saved result to {output}")
-    else:
-        sys.stdout.write(rendered)
+    visible = dict(result)
+    if output:
+        visible["saved_to"] = str(output)
+    if result.get("workflow") in {"named", "tier", "collaboration", "profile"}:
+        if result.get("workflow") == "collaboration":
+            # Keep the overlooked-author and official-navigation channels ahead
+            # of the large candidate portfolio in tool windows that clip stdout.
+            visible = {key: visible[key] for key in (
+                "workflow", "as_of_date", "query", "official_seed_leads",
+                "alternate_collaboration_leads", "official_profile_hints",
+            ) if key in visible} | {key: value for key, value in visible.items()
+                                  if key not in {"workflow", "as_of_date", "query",
+                                                 "official_seed_leads", "alternate_collaboration_leads",
+                                                 "official_profile_hints"}}
+        compact_candidates = []
+        for candidate in result.get("candidates") or []:
+            compact = {key: value for key, value in candidate.items()
+                       if key not in {"needs_verification", "author_affiliations",
+                                      "alternate_profile_ids", "career", "education"}
+                       and value not in (None, [], {})}
+            papers = compact.get("evidence_papers") or []
+            paper_cap = {"profile": 2, "collaboration": 2}.get(result.get("workflow"), 3)
+            if len(papers) > paper_cap:
+                compact["evidence_paper_count"] = len(papers)
+                compact["evidence_papers"] = sorted(
+                    papers, key=lambda p: (
+                        {"title": 2, "keywords": 1}.get(p.get("topic_evidence"), 0),
+                        p.get("year") or 0,
+                    ), reverse=True,
+                )[:paper_cap]
+            if result.get("workflow") == "collaboration":
+                organizations = compact.get("collaboration_organizations") or []
+                compact["collaboration_organization_count"] = len(organizations)
+                compact["collaboration_university_count"] = sum(
+                    bool(row.get("is_university")) for row in organizations)
+                compact["collaboration_organizations"] = [
+                    {key: row[key] for key in ("name", "type", "is_university", "paper_urls")
+                     if key in row}
+                    for row in sorted(organizations, key=lambda row: (
+                        bool(row.get("is_university")), len(row.get("paper_urls") or [])),
+                    reverse=True)[:4]
+                ]
+                if len(organizations) > 4:
+                    compact["collaboration_organizations_omitted"] = len(organizations) - 4
+                if len(compact.get("interests") or []) > 8:
+                    compact["interests"] = compact["interests"][:8]
+            compact_candidates.append(compact)
+        visible["candidates"] = compact_candidates
+    # Model tools often clip long stdout at 30k chars. Always return a compact
+    # evidence view, even when a complete --output artifact was also saved.
+    rendered = json.dumps(visible, ensure_ascii=False, separators=(",", ":")) + "\n"
+    sys.stdout.write(rendered)
 
 
 def paper_topic_relevant(title: str, interests: list[str]) -> bool:
@@ -1801,6 +2627,20 @@ def broad_context_topic_relevant(text: str, focus_terms: list[str]) -> bool:
     primary = normalized_text(focus_terms[0]) if focus_terms else ""
     return primary in {"large language model", "large language models", "llm"} and bool(
         re.search(r"\b(?:language models?|llms?|mllms?)\b", text, re.I))
+
+
+def broad_person_field_recall_terms(focus_terms: list[str], seed_titles: list[str]) -> list[str]:
+    """Use broad robotics branches already visible in an attributed sample."""
+    focus = normalized_text(" ".join(focus_terms))
+    if not contains_any(focus, ("robot", "embodied", "机器人", "具身")):
+        return []
+    titles = normalized_text(" ".join(seed_titles))
+    terms = ["robot"]
+    if contains_any(titles, ("force", "tactile", "触觉", "力觉")):
+        terms.append("force")
+    if contains_any(titles, ("humanoid", "人形")):
+        terms.append("humanoid")
+    return terms
 
 
 def _confident_person_pick(rows: list[dict[str, Any]], school: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
@@ -1923,11 +2763,18 @@ def select_representative_papers(papers: list[dict[str, Any]], limit: int) -> li
 
 def same_scholar_at_university(details: list[dict[str, Any]], chosen: dict[str, Any],
                                school: str, search_org: str) -> bool:
+    # A name plus university does not identify a person. Paper records can
+    # contain a same-name author at a different college, sometimes without an
+    # AMiner person ID. Attribute work only to the selected exact person ID.
+    chosen_id = str(chosen.get("id") or "")
+    if not chosen_id:
+        return False
     org_variants = [str(chosen.get("org") or ""), str(chosen.get("org_zh") or ""), school, search_org]
     org_variants += [item.replace("University", "Univ").replace("university", "univ")
                      for item in org_variants if item]
     return any(
-        normalized_person_name(author.get("name")) == normalized_person_name(chosen.get("name"))
+        str(author.get("id") or "") == chosen_id
+        and normalized_person_name(author.get("name")) == normalized_person_name(chosen.get("name"))
         and ((bool(chosen.get("org_id") and author.get("orgid"))
               and str(author["orgid"]) == str(chosen["org_id"]))
              or contains_any(str(author.get("org") or ""), org_variants))
@@ -2194,6 +3041,82 @@ def deepdive_person(
             if len(recent_context) >= 10:
                 break
         profile["recent_context_papers"] = recent_context
+        # Name-filtered title search misses papers whose titles use a model or
+        # method name instead of the broad field phrase. The person-ID search
+        # is an independent recent recall channel; its cards remain leads.
+        try:
+            id_recent_rows = unwrap(client.call("paper_qa_search", {
+                "query": focus_terms[0], "author_id": [pid], "use_topic": True,
+                "year": [CURRENT_YEAR - 1, CURRENT_YEAR], "size": 50,
+                "force_year_sort": True,
+            }))
+        except AMinerAPIError as exc:
+            warnings.append(f"{name}: 人物 ID 最新方向补检失败：{exc.message}")
+            id_recent_rows = []
+        id_recent_cards = []
+        seen_id_papers = set()
+        for row in id_recent_rows:
+            paper_id = str(row.get("id") or "")
+            title = str(row.get("title") or "").strip()
+            year = row.get("year")
+            if (not paper_id or not title or paper_id in seen_id_papers or
+                    not isinstance(year, int) or year not in (CURRENT_YEAR - 1, CURRENT_YEAR)):
+                continue
+            seen_id_papers.add(paper_id)
+            id_recent_cards.append({
+                "year": year, "title": title,
+                "venue_name": row.get("venue_name") or None,
+                "aminer_url": f"https://www.aminer.cn/pub/{paper_id}",
+            })
+        profile["author_id_recent_search"] = {
+            "window": [CURRENT_YEAR - 1, CURRENT_YEAR],
+            "source": "paper_qa_search with exact person_id",
+            "cards": id_recent_cards[:50],
+            "note": "Recent person-ID search leads. Check selected paper_detail records before claiming author affiliation, author order, venue or task fit.",
+        }
+        # School-constrained name search can miss short university affiliations.
+        # An author-only pass recovers a few branch papers, then verifies their
+        # exact person ID and university before showing them as research leads.
+        seeds = profile["recent_papers"] + profile.get("broad_context_papers", []) + profile.get("recent_context_papers", [])
+        recall_terms = broad_person_field_recall_terms(
+            focus_terms, [str(p.get("title") or "") for p in seeds])
+        field_rows: list[tuple[str, dict[str, Any]]] = []
+        for recall_term in recall_terms:
+            try:
+                rows = unwrap(client.call("paper_search_pro", {
+                    "author": chosen.get("name"), "query": recall_term,
+                    "order": "year", "page": 0, "size": 12,
+                    "year_from": CURRENT_YEAR - 1, "year_to": CURRENT_YEAR,
+                }))
+            except AMinerAPIError as exc:
+                warnings.append(f"{name}: {recall_term} 人物宽词补检失败：{exc.message}")
+                continue
+            field_rows.extend((recall_term, row) for row in rows[:12])
+        field_ids = list(dict.fromkeys(str(row.get("id") or "") for _, row in field_rows if row.get("id")))
+        field_details = fetch_paper_details(client, field_ids, 24, warnings)
+        already_shown = {re.sub(r"[\W_]+", "", normalized_text(p.get("title")))
+                         for p in seeds}
+        recalled: list[dict[str, Any]] = []
+        per_term: Counter[str] = Counter()
+        for recall_term, row in field_rows:
+            paper_id = str(row.get("id") or "")
+            title = str(row.get("title") or "").strip()
+            year = row.get("year")
+            title_key = re.sub(r"[\W_]+", "", normalized_text(title))
+            if (not paper_id or not title or title_key in already_shown or
+                    not isinstance(year, int) or year not in (CURRENT_YEAR - 1, CURRENT_YEAR) or
+                    per_term[recall_term] >= 8):
+                continue
+            details = [field_details[paper_id]] if paper_id in field_details else []
+            if not same_scholar_at_university(details, chosen, school, search_org):
+                continue
+            already_shown.add(title_key)
+            per_term[recall_term] += 1
+            recalled.append({"year": year, "title": title,
+                             "retrieval_term": recall_term,
+                             "source": "author_only_field_recall; person_and_university_verified",
+                             "aminer_url": f"https://www.aminer.cn/pub/{paper_id}"})
+        profile["field_recall_papers"] = recalled
     profile["recent_papers_sampling"] = {
         "selected": len(profile["recent_papers"]), "limit": paper_limit,
         "exhaustive": False,
@@ -2352,9 +3275,11 @@ def main() -> None:
                 # The caller paid to compare every explicit school. A mentor
                 # candidate limit must not silently hide the last schools.
                 "institutions": institutions if schools else institutions[: args.candidate_limit],
+                "mentor_followup_plan": mentor_followup_plan(schools, institutions) if schools else None,
+                "official_seed_leads": official_seed_leads(schools, args.direction, aliases) if schools else {},
                 "warnings": warnings, "errors": errors,
                 "cost_estimate": estimate, "cost": client.cost.summary(),
-                "method_notes": ["Explicit schools use the same terms, year window and per-school detail cap. matched_paper_count counts all verified distinct titles in the inspected sample; representative_papers and evidence_papers are compact citation-ranked and recent excerpts (at most 2+1 when comparing 9 or more schools, otherwise 3+2). Counts are not national rankings."]
+                "method_notes": ["Explicit schools use the same terms, year window and per-school detail cap. matched_paper_count counts task-filtered, affiliation-verified distinct titles in the inspected sample; when compound_focus is set, one-sided papers are in adjacent_topic_paper_count instead. representative_papers and evidence_papers are compact citation-ranked and recent excerpts (at most 2+1 when comparing 9 or more schools, otherwise 3+2). Counts are not national rankings."]
                 if schools else ["Global search is a seed sample, not a national ranking; compare selected schools with --schools."],
             }
             write_result(result, args.output)
@@ -2420,6 +3345,8 @@ def main() -> None:
                     existing.papers.update(candidate.papers)
                     existing.collaboration_orgs.update(candidate.collaboration_orgs)
                     existing.collaboration_types.update(candidate.collaboration_types)
+                    for org_id, paper_ids in candidate.collaboration_papers.items():
+                        existing.collaboration_papers.setdefault(org_id, set()).update(paper_ids)
 
         all_candidates = mark_duplicate_names(all_candidates)
         if profile:
@@ -2451,7 +3378,7 @@ def main() -> None:
         if args.mode == "profile":
             method_notes.append(
                 "The profile result is a paper-based lead pool, not a verified advisor list. "
-                "school_research_leads retains up to three unverified search leads per named school even when "
+                "school_research_leads retains up to five unverified search leads per named school even when "
                 "the overall candidate limit hides them; do not call these people current faculty. "
                 "Use their affiliation units to locate official individual pages and verify task fit. "
                 "A person with official identity and specific work but no degree-role proof can be shown as a "
@@ -2485,11 +3412,16 @@ def main() -> None:
                 school: ({"id": org.org_id, "canonical_name": org.canonical_name} if org else None)
                 for school, org in organization_cache.items()
             },
+            "school_tier_facts": school_tier_facts(schools, tiers) if args.mode == "profile" else {},
             "candidate_counts_by_school": per_school,
             "school_research_leads": school_research_leads(all_ranked, schools)
+            if args.mode in {"profile", "tier"} else {},
+            "task_specific_alternate_leads": task_specific_alternate_leads(
+                all_ranked, ranked, schools, direction_aliases(args.direction, aliases))
             if args.mode == "profile" else {},
-            "official_directory_hints": official_directory_hints(schools, args.direction)
-            if args.mode == "profile" else {},
+            "official_directory_hints": official_directory_hints(schools, args.direction),
+            "official_profile_hints": official_profile_hints(all_ranked),
+            "official_seed_leads": official_seed_leads(schools, args.direction, aliases),
             "verification_next_action": (
                 "When official_directory_hints are present, scan those checked entrypoints first in one bounded "
                 "directory pass instead of guessing hostnames. They are navigation seeds, not current-role proof. "
@@ -2504,6 +3436,8 @@ def main() -> None:
                                  "auto_expanded": bool(auto_added_schools),
                                  "auto_added_schools": auto_added_schools},
             "candidates": [candidate.to_dict() for candidate in ranked],
+            "alternate_collaboration_leads": collaboration_alternate_leads(all_ranked, ranked)
+            if args.mode == "collaboration" else [],
             "hire_screening": hire_screening,
             "portfolio_band_counts": portfolio_band_counts if args.mode == "profile" else None,
             "warnings": list(dict.fromkeys(warnings)), "errors": errors, "cost_estimate": estimate,

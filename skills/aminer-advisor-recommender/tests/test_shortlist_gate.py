@@ -27,6 +27,41 @@ class FakeClient:
         raise AssertionError(api)
 
 
+class ChineseEnglishSplitOrgClient:
+    def call(self, api, params):
+        if api == "org_search":
+            return {"success": True, "data": [{"org_id": "cn-school", "org_name": "南京理工大学"}]}
+        raise AssertionError(api)
+
+
+class SplitOrganizationAffiliationTests(unittest.TestCase):
+    def test_exact_author_chinese_id_and_english_abbreviation_match(self):
+        row = {"school_names": ["南京理工大学", "Nanjing University of Science and Technology"],
+               "school_domain": "njust.edu.cn"}
+        authors = [{"id": "prof", "orgid": "cn-school",
+                    "org": "Nanjing Univ Sci & Technol, Sch Comp Sci & Engn"}]
+        self.assertIsNotNone(gate.paper_affiliation_match(
+            authors, "prof", row, ChineseEnglishSplitOrgClient()))
+        self.assertIsNone(gate.paper_affiliation_match(
+            [{**authors[0], "orgid": "different-school"}], "prof", row,
+            ChineseEnglishSplitOrgClient()))
+
+    def test_blocked_official_page_stops_before_paid_details(self):
+        class NoPaidCalls:
+            def call(self, api, params):
+                raise AssertionError(f"paid call should not run: {api}")
+
+        row = {"name": "吴泽彬", "school_domain": "njust.edu.cn",
+               "school_names": ["南京理工大学", "Nanjing University of Science and Technology"],
+               "official_profile_url": "https://faculty.njust.edu.cn/blocked",
+               "person_id": "person-1",
+               "paper": {"aminer_id": "paper-1", "title": "Remote Sensing Object Detection", "year": 2025}}
+        with patch.object(gate, "fetch_profile_with_retry", side_effect=OSError("503")):
+            result = gate.verify_candidate(row, [], "unspecified", NoPaidCalls())
+        self.assertFalse(result["approved"])
+        self.assertIn("503", " ".join(result["problems"]))
+
+
 class FakeEnglishClient:
     def call(self, api, params):
         if api == "person_detail":
@@ -35,6 +70,52 @@ class FakeEnglishClient:
             return {"success": True, "data": [{"id": params["id"], "title": "HERO Detection", "year": 2026,
                      "authors": [{"id": "h1", "name": "Tingting Han", "org": "Hangzhou Dianzi University"}]}]}
         raise AssertionError(api)
+
+
+class BilingualEnglishPageClient:
+    def call(self, api, params):
+        if api == "person_detail":
+            return {"success": True, "data": {"id": "gao", "name": "Gaoang Wang", "name_zh": "王高昂"}}
+        if api == "paper_detail":
+            return {"success": True, "data": [{"id": "steve", "title": "See and Think: Embodied Agent in Virtual Environment",
+                     "year": 2024, "authors": [{"id": "gao", "name": "Gaoang Wang", "org": "Zhejiang University"}]}]}
+        raise AssertionError(api)
+
+
+class TsinghuaBilingualClient:
+    def __init__(self, chinese, english):
+        self.chinese = chinese
+        self.english = english
+
+    def call(self, api, params):
+        if api == "person_detail":
+            return {"success": True, "data": {"id": "faculty", "name": self.english,
+                                                  "name_zh": self.chinese}}
+        if api == "paper_detail":
+            return {"success": True, "data": [{"id": "llm-paper", "title": "Large Language Model Research",
+                     "year": 2025, "authors": [{"id": "faculty", "name": self.english,
+                                                 "org": "Tsinghua University"}]}]}
+        raise AssertionError(api)
+
+
+class DetailWithoutYearClient(FakeClient):
+    def call(self, api, params):
+        if api == "paper_info":
+            return {"success": True, "data": [{"id": "paper1", "year": 2024}]}
+        row = super().call(api, params)
+        if api == "paper_detail":
+            row["data"][0].pop("year")
+        return row
+
+
+class VenueYearOnlyClient(DetailWithoutYearClient):
+    def call(self, api, params):
+        row = super().call(api, params)
+        if api == "paper_info":
+            row["data"][0].pop("year")
+        if api == "paper_detail":
+            row["data"][0]["venue"] = {"raw": "ICLR 2024"}
+        return row
 
 
 class WrongAffiliationClient(FakeClient):
@@ -73,6 +154,99 @@ class EnglishUniversityClient(FakeClient):
 
 
 class ShortlistGateTest(unittest.TestCase):
+    def test_unspecified_degree_still_requires_official_faculty_role_and_attributed_paper(self):
+        row = {"name": "刘志", "school_domain": "shu.edu.cn",
+               "school_names": ["上海大学", "Shanghai University"], "person_id": "p1",
+               "official_profile_url": "https://faculty.shu.edu.cn/person",
+               "paper": {"aminer_id": "paper1", "title": "Detection Work", "year": 2024}}
+        with patch.object(gate, "fetch_official", return_value="刘志，上海大学教授。"):
+            approved = gate.verify_candidate(row, [], "unspecified", FakeClient(), ["detection"])
+        self.assertTrue(approved["approved"], approved["problems"])
+        self.assertEqual(approved["verified"]["official_faculty_role"], "教授")
+        with patch.object(gate, "fetch_official", return_value="刘志，上海大学成员。"):
+            pending = gate.verify_candidate(row, [], "unspecified", FakeClient(), ["detection"])
+        self.assertFalse(pending["approved"])
+        self.assertIn("faculty role", " ".join(pending["problems"]))
+        missing_page = dict(row, official_profile_url="")
+        rejected = gate.verify_candidate(missing_page, [], "unspecified", FakeClient(), ["detection"])
+        self.assertFalse(rejected["approved"])
+        with patch.object(gate, "fetch_official", return_value="刘志，上海大学教授。"):
+            year_from_info = gate.verify_candidate(row, [], "unspecified", DetailWithoutYearClient(),
+                                                   ["detection"])
+        self.assertTrue(year_from_info["approved"], year_from_info["problems"])
+        with patch.object(gate, "fetch_official", return_value="刘志，上海大学教授。"):
+            year_from_venue = gate.verify_candidate(row, [], "unspecified", VenueYearOnlyClient(),
+                                                    ["detection"])
+        self.assertTrue(year_from_venue["approved"], year_from_venue["problems"])
+        self.assertEqual(year_from_venue["verified"]["paper_year_source"], "AMiner venue label")
+
+    def test_unspecified_degree_accepts_concrete_person_specific_official_project(self):
+        excerpt = "面向室内移动机器人导航中的视觉定位问题，研究跨场景特征匹配和强化学习路径规划方法。"
+        row = {"name": "刘志", "school_domain": "shu.edu.cn",
+               "official_profile_url": "https://faculty.shu.edu.cn/person",
+               "official_project": {"title": "跨场景机器人导航研究", "excerpt": excerpt}}
+        page = "刘志，上海大学教授。项目：跨场景机器人导航研究。" + excerpt
+        with patch.object(gate, "fetch_official", return_value=page):
+            result = gate.verify_candidate(row, [], "unspecified", None, ["机器人导航"])
+        self.assertTrue(result["approved"], result["problems"])
+        self.assertEqual(result["verified"]["official_project_title"], "跨场景机器人导航研究")
+        with patch.object(gate, "fetch_official", return_value="刘志，上海大学教授。项目：跨场景机器人导航研究。"):
+            unsupported = gate.verify_candidate(row, [], "unspecified", None, ["机器人导航"])
+        self.assertFalse(unsupported["approved"])
+
+    def test_combined_master_and_doctor_supervisor_wording_counts_for_both(self):
+        page = "彭亚新，教授，硕士生/博士生导师。"
+        self.assertTrue(gate.has_role_for_name(page, "彭亚新", "master", roster=False))
+        self.assertTrue(gate.has_role_for_name(page, "彭亚新", "doctor", roster=False))
+
+    def test_broad_robot_word_does_not_make_teleoperation_robot_learning(self):
+        self.assertEqual(gate.title_focus_matches(
+            "Implicit Neural Field Guidance for Teleoperated Robot-assisted Surgery",
+            ["manipulation", "imitation learning", "navigation", "robot", "机器人"]), [])
+
+    def test_english_official_profile_can_bind_exact_bilingual_aminer_person(self):
+        row = {"name": "Gaoang Wang", "school_domain": "zju.edu.cn",
+               "school_names": ["浙江大学", "Zhejiang University"], "person_id": "gao",
+               "official_profile_url": "https://person.zju.edu.cn/en/gaoangwang",
+               "paper": {"aminer_id": "steve", "title": "See and Think: Embodied Agent in Virtual Environment",
+                         "year": 2024}}
+        page = "Gaoang Wang-Zhejiang University Personal homepage ... Wang Gaoang Assistant Professor / Researcher, ZJU-UIUC Institute."
+        with patch.object(gate, "fetch_official", return_value=page):
+            result = gate.verify_candidate(row, [], "unspecified", BilingualEnglishPageClient(),
+                                           ["embodied agent"])
+        self.assertTrue(result["approved"], result["problems"])
+        self.assertEqual(result["verified"]["canonical_name"], "王高昂")
+        self.assertEqual(result["verified"]["official_faculty_role"], "Assistant Professor")
+
+    def test_chinese_aminer_name_can_use_exact_id_bound_english_official_profile(self):
+        for chinese, english, page in (
+            ("刘知远", "Zhiyuan Liu", "Zhiyuan Liu Professor, Department of Computer Science, Tsinghua University."),
+            ("唐杰", "Jie Tang", "Jie Tang (Tang, Jie) 唐 杰 Professor, Department of Computer Science, Tsinghua University."),
+        ):
+            with self.subTest(chinese=chinese):
+                row = {"name": chinese, "person_id": "faculty", "school_domain": "tsinghua.edu.cn",
+                       "school_names": ["清华大学", "Tsinghua University"],
+                       "official_profile_url": "https://faculty.tsinghua.edu.cn/profile",
+                       "paper": {"aminer_id": "llm-paper", "title": "Large Language Model Research", "year": 2025}}
+                with patch.object(gate, "fetch_official", return_value=page):
+                    result = gate.verify_candidate(row, [], "unspecified",
+                                                   TsinghuaBilingualClient(chinese, english), ["large language model"])
+                self.assertTrue(result["approved"], result["problems"])
+                self.assertEqual(result["verified"]["canonical_name"], chinese)
+                self.assertEqual(result["verified"]["official_page_english_name"], english)
+                self.assertEqual(result["verified"]["official_faculty_role"], "Professor")
+
+    def test_english_alias_without_official_role_does_not_pass_gate(self):
+        row = {"name": "刘知远", "person_id": "faculty", "school_domain": "tsinghua.edu.cn",
+               "school_names": ["清华大学", "Tsinghua University"],
+               "official_profile_url": "https://faculty.tsinghua.edu.cn/profile",
+               "paper": {"aminer_id": "llm-paper", "title": "Large Language Model Research", "year": 2025}}
+        with patch.object(gate, "fetch_official", return_value="Zhiyuan Liu, Tsinghua University member."):
+            result = gate.verify_candidate(row, [], "unspecified",
+                                           TsinghuaBilingualClient("刘知远", "Zhiyuan Liu"), ["large language model"])
+        self.assertFalse(result["approved"])
+        self.assertIn("official profile does not establish this person's faculty role", result["problems"])
+
     def test_missing_person_id_resolves_only_by_exact_school_name_and_paper_author(self):
         row = {"name": "刘志", "school_domain": "shu.edu.cn",
                "school_names": ["上海大学", "Shanghai University"],
@@ -363,6 +537,17 @@ class ShortlistGateTest(unittest.TestCase):
             result = gate.verify_candidate(row, [], "master", EnglishUniversityClient())
         self.assertTrue(result["approved"], result["problems"])
         self.assertEqual(gate.school_name_list(row), ["苏州大学"])
+
+    def test_missing_school_names_fails_before_paid_api_calls(self):
+        row = {"name": "刘志", "school_domain": "suda.edu.cn", "person_id": "p1",
+               "organization": "苏州大学计算机科学与技术学院",
+               "official_profile_url": "https://scst.suda.edu.cn/liu",
+               "paper": {"title": "Detection Work", "year": 2024, "aminer_id": "paper1"}}
+        with patch.object(gate, "fetch_official") as fetch:
+            result = gate.verify_candidate(row, [], "master", EnglishUniversityClient())
+        self.assertFalse(result["approved"])
+        self.assertIn("school_names is required", " ".join(result["problems"]))
+        fetch.assert_not_called()
 
     def test_candidate_band_is_rejected_even_with_other_evidence(self):
         row = {"name": "王伟行", "school_domain": "suda.edu.cn", "band": "匹配",

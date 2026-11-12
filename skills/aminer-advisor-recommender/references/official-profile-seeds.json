@@ -1,0 +1,301 @@
+[
+  {
+    "school": "东南大学",
+    "name": "杨冠羽",
+    "url": "https://cs.seu.edu.cn/gyyang/main.htm",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "medical image analysis",
+      "medical imaging",
+      "医学影像"
+    ]
+  },
+  {
+    "school": "复旦大学",
+    "name": "庄吓海",
+    "url": "https://istbi.fudan.edu.cn/info/1774/8240.htm",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "medical image analysis",
+      "medical imaging",
+      "医学影像"
+    ]
+  },
+  {
+    "school": "复旦大学",
+    "name": "单洪明",
+    "url": "https://istbi.fudan.edu.cn/info/1774/4617.htm",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "medical image analysis",
+      "medical imaging",
+      "医学影像"
+    ]
+  },
+  {
+    "school": "上海交通大学",
+    "name": "刘满华",
+    "url": "https://www.cs.sjtu.edu.cn/jiaoshiml/liumanhua.html",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "medical image analysis",
+      "medical imaging",
+      "医学影像"
+    ]
+  },
+  {
+    "school": "南京医科大学",
+    "name": "赵侃侃",
+    "url": "https://bmei.njmu.edu.cn/2025/1022/c19988a292478/page.htm",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "medical image analysis",
+      "medical imaging",
+      "医学影像"
+    ]
+  },
+  {
+    "school": "哈尔滨工业大学",
+    "name": "王宽全",
+    "url": "https://homepage.hit.edu.cn/wangkuanquan",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "medical image analysis",
+      "medical imaging",
+      "医学影像"
+    ]
+  },
+  {
+    "school": "哈尔滨工业大学",
+    "name": "骆功宁",
+    "url": "https://homepage.hit.edu.cn/luogongning",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "medical image analysis",
+      "medical imaging",
+      "医学影像"
+    ]
+  },
+  {
+    "school": "东华大学",
+    "name": "刘华山",
+    "url": "https://www.dhu.edu.cn/2024/0510/c19081a421106/page.htm",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "robot learning",
+      "robot",
+      "机器人学习"
+    ],
+    "source_page_published_on": "2024-05-10"
+  },
+  {
+    "school": "合肥工业大学",
+    "name": "黄云志",
+    "url": "https://faculty.hfut.edu.cn/hyz1/zh_CN/yjfx/177937/content/3454.htm",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "robot learning",
+      "robot",
+      "机器人学习"
+    ]
+  },
+  {
+    "school": "华东理工大学",
+    "name": "唐漾",
+    "url": "https://faculty.ecust.edu.cn/cise/ty1/main.htm",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "robot learning",
+      "robot",
+      "机器人学习"
+    ]
+  },
+  {
+    "school": "上海交通大学",
+    "name": "张伟楠",
+    "url": "https://www.cs.sjtu.edu.cn/jiaoshiml/zhangweinan.html",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "robot learning",
+      "robot",
+      "机器人学习"
+    ]
+  },
+  {
+    "school": "上海交通大学",
+    "name": "刘哲",
+    "url": "https://sais.sjtu.edu.cn/faculty/liuzhe.html",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "robot learning",
+      "robot",
+      "机器人学习"
+    ]
+  },
+  {
+    "school": "浙江大学",
+    "name": "许超",
+    "url": "https://person.zju.edu.cn/xu",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "robot learning",
+      "robot",
+      "机器人学习"
+    ]
+  },
+  {
+    "school": "杭州电子科技大学",
+    "name": "徐杭",
+    "url": "https://faculty.hdu.edu.cn/txgxxy/xh2/main.htm",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "object detection",
+      "目标检测"
+    ]
+  },
+  {
+    "school": "上海交通大学",
+    "name": "吕宝粮",
+    "url": "https://bcmi.sjtu.edu.cn/home/blu/",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "artificial intelligence",
+      "AI",
+      "人工智能"
+    ]
+  },
+  {
+    "school": "上海大学",
+    "name": "李恭杨",
+    "url": "https://scie-ie.shu.edu.cn/info/1078/1195.htm",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "object detection",
+      "目标检测",
+      "computer vision",
+      "计算机视觉"
+    ]
+  },
+  {
+    "school": "上海交通大学",
+    "name": "严骏驰",
+    "url": "https://soai.sjtu.edu.cn/cn/facultydetails/zzjs/yanjunchi",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "artificial intelligence",
+      "人工智能",
+      "AI",
+      "machine learning",
+      "机器学习"
+    ]
+  },
+  {
+    "school": "上海交通大学",
+    "name": "卢策吾",
+    "url": "https://sai.sjtu.edu.cn/cn/facultydetails/zzjs/lucewu",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "artificial intelligence",
+      "人工智能",
+      "AI",
+      "robot",
+      "机器人",
+      "robot learning",
+      "具身智能"
+    ]
+  },
+  {
+    "school": "浙江大学",
+    "name": "高飞",
+    "url": "https://person.zju.edu.cn/0019250/0.html",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "robot learning",
+      "robot",
+      "机器人",
+      "navigation",
+      "具身智能"
+    ]
+  },
+  {
+    "school": "浙江大学",
+    "name": "王高昂",
+    "url": "https://person.zju.edu.cn/en/gaoangwang",
+    "checked_on": "2026-11-09",
+    "topic_terms": [
+      "embodied intelligence",
+      "embodied AI",
+      "具身智能",
+      "embodied agent"
+    ]
+  },
+  {
+    "school": "东南大学",
+    "name": "朱利丰",
+    "url": "https://ins.seu.edu.cn/zlf/list.htm",
+    "checked_on": "2026-11-06",
+    "topic_terms": [
+      "robot learning",
+      "robot",
+      "机器人",
+      "manipulation",
+      "具身智能"
+    ]
+  },
+  {
+    "school": "上海大学",
+    "name": "彭亚新",
+    "url": "https://ai.shu.edu.cn/info/1073/3348.htm",
+    "checked_on": "2026-11-07",
+    "source_page_published_on": "2024-09-24",
+    "topic_terms": [
+      "robot learning",
+      "机器人学习",
+      "具身智能",
+      "embodied",
+      "imitation learning",
+      "manipulation"
+    ]
+  },
+  {
+    "school": "上海交通大学",
+    "name": "谢伟迪",
+    "url": "https://sai.sjtu.edu.cn/cn/facultydetails/jgsz/xieweidi",
+    "checked_on": "2026-11-07",
+    "topic_terms": [
+      "multimodal",
+      "多模态",
+      "vision-language",
+      "图文检索",
+      "image-text retrieval",
+      "visual language model"
+    ]
+  },
+  {
+    "school": "复旦大学",
+    "name": "邱锡鹏",
+    "url": "https://cs.fudan.edu.cn/c5/46/c30604a443718/page.htm",
+    "checked_on": "2026-11-10",
+    "source_page_published_on": "2025-12-23",
+    "topic_terms": [
+      "multimodal large language model",
+      "multimodal",
+      "多模态大模型",
+      "vision-language model",
+      "AnyGPT"
+    ]
+  },
+  {
+    "school": "上海交通大学",
+    "name": "张倬胜",
+    "url": "https://www.cs.sjtu.edu.cn/jiaoshiml/zhangzhuosheng.html",
+    "checked_on": "2026-11-10",
+    "topic_terms": [
+      "multimodal large language model",
+      "multimodal chain-of-thought",
+      "多模态大模型",
+      "multimodal reasoning",
+      "MM-CoT"
+    ]
+  }
+]

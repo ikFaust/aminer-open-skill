@@ -44,8 +44,11 @@ class Page(HTMLParser):
             self.skip -= 1
 
 
+OFFICIAL_PAGE_USER_AGENT = "Mozilla/5.0 (compatible; AcademicAdvisorAudit/1.0)"
+
+
 def fetch(url):
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    request = urllib.request.Request(url, headers={"User-Agent": OFFICIAL_PAGE_USER_AGENT})
     with urllib.request.urlopen(request, timeout=12) as response:
         charset = response.headers.get_content_charset() or "utf-8"
         body = response.read(300000).decode(charset, "replace")
@@ -53,6 +56,105 @@ def fetch(url):
         page.raw_html = body
         page.feed(body)
         return response.url, page
+
+
+def webplus_named_profiles(page, page_url, names):
+    """Search a university's public WebPlus teacher index by exact name.
+
+    The endpoint is accepted only when advertised by the fetched official page;
+    its search hits are links to inspect, not proof of position or degree role.
+    """
+    if "queryObj=teacherHome" not in page.raw_html:
+        raise ValueError("This official page does not advertise a WebPlus teacher search")
+    origin = urllib.parse.urlsplit(page_url)
+    if not origin.hostname or not origin.hostname.endswith(".edu.cn"):
+        raise ValueError("Teacher search must be on an official university host")
+    endpoint = urllib.parse.urlunsplit((origin.scheme, origin.netloc,
+                                       "/_wp3services/generalQuery", "queryObj=teacherHome", ""))
+    fields = ("title", "cnUrl", "department", "career", "exField6")
+    return_infos = json.dumps([{"field": field, "name": field} for field in fields])
+    hits = []
+    errors = []
+    for name in names[:10]:
+        conditions = [{"field": "title", "value": name, "judge": "like"},
+                      {"field": "language", "value": "1", "judge": "="},
+                      {"field": "published", "value": "1", "judge": "="}]
+        payload = urllib.parse.urlencode({
+            "pageIndex": 1, "rows": 20,
+            "conditions": json.dumps(conditions, ensure_ascii=False),
+            "orders": json.dumps([{"field": "hot", "type": "desc"}]),
+            "returnInfos": return_infos, "articleType": 1, "level": 0,
+            "pageEvent": "doSearchByPage",
+        }).encode()
+        request = urllib.request.Request(endpoint, data=payload, headers={
+            "User-Agent": OFFICIAL_PAGE_USER_AGENT, "Referer": page_url,
+            "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+        })
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                result = json.loads(response.read(300000).decode("utf-8", "replace"))
+            rows = result.get("data") if isinstance(result, dict) else None
+            if not isinstance(rows, list):
+                raise ValueError("Teacher search returned no data list")
+            for row in rows:
+                if not isinstance(row, dict) or str(row.get("title", "")).strip() != name:
+                    continue
+                url = public_link(page_url, row.get("cnUrl"))
+                if not url or not same_university_domain(url, page_url):
+                    continue
+                hits.append({"name": name, "url": url,
+                             "department": str(row.get("department") or ""),
+                             "career_from_index": str(row.get("career") or "")})
+        except Exception as exc:
+            errors.append({"name": name, "error": type(exc).__name__ + ": " + str(exc)[:120]})
+    return endpoint, hits, errors
+
+
+def search_named_profiles(url, names, terms, degree=None):
+    final_url, page = fetch(url)
+    endpoint, hits, errors = webplus_named_profiles(page, final_url, names)
+    with ThreadPoolExecutor(max_workers=min(4, len(hits) or 1)) as pool:
+        inspected = list(pool.map(lambda hit: inspect_person((hit["name"], hit["url"]), terms), hits))
+    profiles = []
+    for hit, row in zip(hits, inspected):
+        row.update({"department_from_index": hit["department"],
+                    "career_from_index": hit["career_from_index"]})
+        profiles.append(row)
+    found = {row["name"] for row in profiles if "error" not in row}
+    return {"source": final_url, "dynamic_roster_sources": [{"endpoint": endpoint,
+             "method": "official WebPlus exact-name search"}],
+            "requested_names": names, "profiles": profiles,
+            "matches": [row for row in profiles if row.get("matched_terms")],
+            "not_found": [name for name in names if name not in found],
+            "errors": errors,
+            "note": "Exact-name official search and individual profile text only. Index career is a lead; the individual page must support current role, degree-supervisor status and task fit separately."}
+
+
+def embedded_teacher_page(page, page_url):
+    """Read an official faculty page whose filtered roster is embedded as JSON."""
+    html = page.raw_html
+    if 'id="showdatainfo"' not in html:
+        return None
+    match = re.search(r"\bvar\s+ret\s*=\s*", html)
+    if not match:
+        return None
+    try:
+        rows, _ = json.JSONDecoder().raw_decode(html[match.end():].lstrip())
+    except ValueError:
+        return None
+    if not isinstance(rows, list) or not rows or len(rows) > 1000:
+        return None
+    roster = Page()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get('showTitle') or '').strip()
+        url = public_link(page_url, row.get('url'))
+        if (not name or len(name) > 30 or not url
+                or not same_university_domain(url, page_url)):
+            continue
+        roster.links.append((name, url))
+    return ('embedded:' + page_url, roster) if roster.links else None
 
 
 def dynamic_teacher_page(page, page_url):
@@ -74,7 +176,7 @@ def dynamic_teacher_page(page, page_url):
         "type": 1, "zm": "All", "zc": "全部", "search": "",
     }).encode()
     request = urllib.request.Request(endpoint, data=params,
-                                     headers={"User-Agent": "Mozilla/5.0", "Referer": page_url})
+                                     headers={"User-Agent": OFFICIAL_PAGE_USER_AGENT, "Referer": page_url})
     with urllib.request.urlopen(request, timeout=15) as response:
         data = json.loads(response.read(1000000).decode("utf-8", "replace"))
     content = data.get("content") if isinstance(data, dict) else None
@@ -144,6 +246,7 @@ def faculty_navigation(page, base_url, root, unit_terms=()):
     """Find faculty lists and directly linked institute sites at the same university."""
     seen = set()
     links = []
+    ranked_links = []
     for label, href in page.links:
         label = label.strip(" -·\t\r\n")
         url = public_link(base_url, href)
@@ -155,7 +258,8 @@ def faculty_navigation(page, base_url, root, unit_terms=()):
                                        "导师简介", "博导简介", "硕导简介", "教授", "副教授",
                                        "博导名单", "硕导名单", "faculty", "teachers"}
         category = label == "硕博导师" or label.endswith(("研究所", "研究院", "工程系"))
-        unit_index = label in {"院部设置", "院系设置", "学院设置", "院系机构", "专业学院"}
+        unit_index = label in {"院部设置", "院系设置", "学院设置", "院系机构", "专业学院",
+                               "机构设置", "教学科研机构"}
         target_unit = (bool(unit_terms) and len(label) <= 35
                        and not re.search(r"(新闻|报告|论坛|通知|招聘|招生|会议|讲座|校友|研究生)", label)
                        and any(term in label for term in unit_terms)
@@ -170,7 +274,11 @@ def faculty_navigation(page, base_url, root, unit_terms=()):
             continue
         seen.add(url)
         links.append(url)
-    return links
+        matched_unit_length = max((len(term) for term in unit_terms if term in label), default=0) if target_unit else 0
+        priority = (-matched_unit_length if target_unit else
+                    0 if unit_index else 1 if institute_home else 2)
+        ranked_links.append((priority, url))
+    return [url for _, url in sorted(ranked_links, key=lambda item: item[0])] if unit_terms else links
 
 
 def faculty_pagination(page, base_url, root):
@@ -203,31 +311,55 @@ def research_excerpt(text, term):
 
 
 def research_text(text):
-    match = re.search(r"研究(?:方向|主题|领域|兴趣)\s*[:：]?", text)
-    if not match:
+    matches = list(re.finditer(r"研究(?:方向|主题|领域|兴趣)\s*[:：]?", text))
+    if not matches:
         return text, "page_text"
-    start = match.start()
-    end = min(len(text), start + 800)
-    for marker in ("个人简历", "个人简介", "教育经历", "工作经历", "版权所有"):
-        position = text.find(marker, match.end())
-        if position >= 0:
-            end = min(end, position)
-    return text[start:end], "research_section"
+    sections = []
+    for match in matches[:8]:
+        start = match.start()
+        end = min(len(text), start + 800)
+        for marker in ("个人简历", "个人简介", "教育经历", "工作经历", "版权所有"):
+            position = text.find(marker, match.end())
+            if position >= 0:
+                end = min(end, position)
+        sections.append(text[start:end])
+    # Faculty portals often print a short header and a navigation label before
+    # the real biography. The longer section is the actual research narrative.
+    return max(sections, key=len), "research_section"
 
 
 def profile_role(text, name, degree):
     for match in re.finditer(re.escape(name), text):
         nearby = text[max(0, match.start() - 100):match.end() + 1500]
         if degree == "master" and ("硕士生导师" in nearby or "硕导" in nearby or
+                                   re.search(r"硕士生?\s*[/、和及与]\s*博士生?导师", nearby) or
+                                   re.search(r"\bmaster'?s?\s+supervisor\b", nearby, re.I) or
                                    re.search(r"(?:报考本人|招收|招生).{0,25}硕士研究生", nearby)):
             return True
         if degree == "doctor" and ("博士生导师" in nearby or "博导" in nearby or
+                                   re.search(r"\b(?:doctoral|ph\.?d\.?)\s+supervisor\b", nearby, re.I) or
                                    re.search(r"(?:报考本人|招收|招生).{0,25}博士研究生", nearby)):
             return True
     return False
 
 
-def paper_excerpt(text):
+def paper_excerpt(text, terms=()):
+    # Official WebPlus biographies often publish a numbered bibliography
+    # without saying "代表作". Surface a quoted, dated task paper so the gate
+    # can use the official page itself when an English AMiner profile cannot be
+    # safely bound to the Chinese faculty name.
+    dated_titles = []
+    for match in re.finditer(r"[“\"]([^”\"]{25,180})[”\"]", text):
+        title = match.group(1)
+        focus_match = any(term.casefold() in title.casefold() for term in terms)
+        tail = text[match.end():match.end() + 180]
+        year = re.search(r"20(?:2[1-9]|3\d)", tail)
+        if year:
+            dated_titles.append((focus_match, int(year.group()),
+                                 text[max(0, match.start() - 95):match.end() + min(140, year.end() + 35)]))
+    if dated_titles:
+        dated_titles.sort(key=lambda row: (row[0], row[1]), reverse=True)
+        return " | ".join(excerpt for _, _, excerpt in dated_titles[:2])[:800]
     for pattern in (r"代表作", r"代表性论文", r"论文\s*\d+[.、]"):
         match = re.search(pattern, text)
         if match:
@@ -250,26 +382,38 @@ def personal_homepage_key(text):
     return key
 
 
-def inspect_person(item, terms):
+def inspect_person(item, terms, require_name=False):
     name, url = item
     try:
         final_url, page = fetch(url)
     except Exception as exc:
         return {"name": name, "url": url, "error": type(exc).__name__ + ": " + str(exc)[:120]}
+    if require_name and not same_university_domain(final_url, url):
+        return {"name": name, "url": final_url,
+                "error": "individual profile redirected outside the original university domain"}
     text = " ".join(" ".join(page.words).split())
+    if require_name and not re.search(r"(?<![\u4e00-\u9fff])" + re.escape(name) +
+                                      r"(?![\u4e00-\u9fff])", text):
+        return {"name": name, "url": final_url,
+                "error": "exact requested name is absent from the fetched official page"}
     focus, scope = research_text(text)
     matched = [term for term in terms if term.casefold() in focus.casefold()]
+    page_date = re.search(r"(?:创建时间|发布时间|发布日期|更新日期|Last updated|Published)\s*[:：]?\s*"
+                          r"(20\d{2}[-/.]\d{1,2}[-/.]\d{1,2})", text, re.I)
     return {"name": name, "url": final_url, "matched_terms": matched,
+            "source_page_published_on": page_date.group(1).replace("/", "-").replace(".", "-") if page_date else "",
             "match_scope": scope, "snippets": {term: research_excerpt(focus, term) for term in matched},
             "personal_homepage_key": personal_homepage_key(text),
-            "role_excerpt": next((research_excerpt(text, role) for role in ("博士生导师", "硕士生导师", "教授", "研究员")
-                                  if role in text), ""),
+            "role_excerpt": next((research_excerpt(text, role) for role in
+                                  ("博士生导师", "硕士生导师", "教授", "研究员", "Assistant Professor",
+                                   "Associate Professor", "Professor", "Researcher", "Doctoral supervisor")
+                                  if role.casefold() in text.casefold()), ""),
             "master_supervisor_explicit": profile_role(text, name, "master"),
             "doctor_supervisor_explicit": profile_role(text, name, "doctor"),
-            "paper_excerpt": paper_excerpt(text)}
+            "paper_excerpt": paper_excerpt(text, terms)}
 
 
-def scan(url, terms, max_profiles=150, max_results=25, degree=None, unit_terms=()):
+def scan(url, terms, max_profiles=150, max_results=25, degree=None, unit_terms=(), names=()):
     if not url.startswith(("http://", "https://")):
         raise ValueError("Faculty directory URL must use HTTP(S)")
     fallback_from = ""
@@ -327,9 +471,15 @@ def scan(url, terms, max_profiles=150, max_results=25, degree=None, unit_terms=(
             continue
         visited.add(page_url)
         directory_pages.append(page_url)
-        page_links = teacher_links(current_page, page_url, url)
+        # A university-wide home page can expose news cards whose labels look
+        # like Chinese personal names and whose CMS /info/ URLs resemble profiles.
+        # Navigate to an actual college/faculty page before extracting people.
+        page_host = urllib.parse.urlsplit(page_url).hostname or ""
+        page_path = urllib.parse.urlsplit(page_url).path
+        university_home = page_host in {domain, "www." + domain} and page_path in {"", "/"}
+        page_links = [] if university_home else teacher_links(current_page, page_url, url)
         try:
-            dynamic = dynamic_teacher_page(current_page, page_url)
+            dynamic = dynamic_teacher_page(current_page, page_url) or embedded_teacher_page(current_page, page_url)
             if dynamic:
                 endpoint, roster_page = dynamic
                 dynamic_links = teacher_links(roster_page, page_url, url)
@@ -356,6 +506,7 @@ def scan(url, terms, max_profiles=150, max_results=25, degree=None, unit_terms=(
         child_urls = faculty_pagination(current_page, page_url, url) if depth < 4 else []
         if depth < 4:
             child_urls = faculty_navigation(current_page, page_url, url, unit_terms) + child_urls
+        pending_children = []
         for child_url in child_urls:
             if child_url in visited or any(child_url == queued[0] for queued in queue):
                 continue
@@ -364,9 +515,18 @@ def scan(url, terms, max_profiles=150, max_results=25, degree=None, unit_terms=(
             except Exception as exc:
                 navigation_errors.append({"url": child_url, "error": type(exc).__name__ + ": " + str(exc)[:120]})
                 continue
-            queue.append((child_url, child_page, depth + 1))
+            pending_children.append((child_url, child_page, depth + 1))
+        # A named college should be explored before generic university faculty
+        # pages; otherwise their large rosters consume the inspection cap.
+        if unit_terms:
+            queue[:0] = pending_children
+        else:
+            queue.extend(pending_children)
     links_found = len(links)
     roster = [{"name": name, "url": profile_url} for name, profile_url in links]
+    if names:
+        requested = set(names)
+        links = [item for item in links if item[0] in requested]
     links = links[:max_profiles]
     with ThreadPoolExecutor(max_workers=min(4, len(links) or 1)) as pool:
         rows = list(pool.map(lambda item: inspect_person(item, terms), links))
@@ -409,6 +569,8 @@ def scan(url, terms, max_profiles=150, max_results=25, degree=None, unit_terms=(
                 official_role_without_dated_paper.append(row)
     return {"source": best_source, "fallback_from": fallback_from,
             "http_retry_from": http_retry_from,
+            "requested_names": list(names),
+            "not_found_in_linked_roster": [name for name in names if name not in {row["name"] for row in roster}],
             "directory_pages": directory_pages,
             "dynamic_roster_sources": dynamic_roster_sources,
             "unit_directory_links": unit_directory_links[:60],
@@ -438,6 +600,10 @@ def main():
                         help="Include every discovered teacher link; degree-specific searches return a compact roster sample by default")
     parser.add_argument("--unit-terms", default="",
                         help="When starting at a university homepage, follow official college links matching these comma-separated names")
+    parser.add_argument("--names", default="",
+                        help="Exact candidate names; use WebPlus search when advertised, otherwise scan linked official roster")
+    parser.add_argument("--profile-name", default="",
+                        help="Fetch this individual official profile URL and require the exact name on that page")
     args = parser.parse_args()
     if not (1 <= args.max_profiles <= 150 and 1 <= args.max_results <= 50):
         parser.error("max-profiles must be 1–150 and max-results 1–50")
@@ -445,6 +611,35 @@ def main():
     unit_terms = list(dict.fromkeys(x.strip() for x in args.unit_terms.split(",") if x.strip()))
     if not terms:
         parser.error("at least one term is required")
+    if args.profile_name:
+        if args.names:
+            parser.error("--profile-name and --names are mutually exclusive")
+        host = urllib.parse.urlsplit(args.url).hostname or ""
+        if not host.endswith(".edu.cn"):
+            parser.error("--profile-name requires an official .edu.cn URL")
+        profile = inspect_person((args.profile_name.strip(), args.url), terms, require_name=True)
+        print(json.dumps({"source": profile.get("url", args.url),
+                          "profile": profile,
+                          "scope": "exact-name individual official page only; role, degree, task paper and current cycle require separate checks"},
+                         ensure_ascii=False, separators=(",", ":")))
+        return
+    names = list(dict.fromkeys(x.strip() for x in args.names.split(",") if x.strip()))
+    if names:
+        if len(names) > 10:
+            parser.error("--names accepts at most 10 exact names")
+        try:
+            result = search_named_profiles(args.url, names, terms, args.degree)
+        except ValueError as exc:
+            if "does not advertise a WebPlus teacher search" not in str(exc):
+                raise
+            result = scan(args.url, terms, args.max_profiles, args.max_results,
+                          args.degree, unit_terms, names)
+            result["search_mode"] = "linked_official_roster_fallback"
+            result["note"] += (" Exact-name roster fallback inspected only linked matching names; "
+                               "an absent name can reflect incomplete site navigation, not absent faculty.")
+        print(json.dumps(result,
+                         ensure_ascii=False, separators=(",", ":")))
+        return
     result = scan(args.url, terms, args.max_profiles, args.max_results, args.degree, unit_terms)
     if args.degree and not args.full_roster:
         roster = result.pop("roster")
