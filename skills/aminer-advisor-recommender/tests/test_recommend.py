@@ -50,6 +50,7 @@ from recommend import (  # noqa: E402
     filter_discipline_conflicts,
     institution_level,
     industrial_few_shot_defect_paper,
+    retain_joint_topic_candidates,
     interest_matches_direction,
     is_mainland_china_institution,
     is_university_affiliation,
@@ -1207,6 +1208,23 @@ class RecommendationLogicTests(unittest.TestCase):
         self.assertEqual({p["id"] for p in row["representative_papers"]}, {"fesflow", "nex"})
         self.assertTrue(any(api == "paper_qa_search" and params.get("topic_high")
                             for api, params in client.calls))
+
+    def test_compound_mentor_pool_excludes_split_one_sided_portfolio(self):
+        joint = {"id": "joint", "title": "Few-shot Surface Defect Detection for Manufacturing",
+                 "year": CURRENT_YEAR - 1}
+        defect = {"id": "defect", "title": "Industrial Surface Defect Detection",
+                  "year": CURRENT_YEAR - 1}
+        few_shot = {"id": "few", "title": "Few-shot Image Classification",
+                    "year": CURRENT_YEAR - 1}
+        candidates = {
+            "good": Candidate("good", "Good", papers={"joint": joint}),
+            "split": Candidate("split", "Split", papers={"defect": defect, "few": few_shot}),
+        }
+        warnings = []
+        kept = retain_joint_topic_candidates(candidates,
+                                             {p["id"]: p for p in (joint, defect, few_shot)}, warnings)
+        self.assertEqual(list(kept), ["good"])
+        self.assertIn("one-sided", warnings[0])
 
     def test_discover_title_view_recalls_direct_code_paper_qa_missed(self):
         paper = {"id": "class-eval", "title": "Evaluating Large Language Models in Class-Level Code Generation",

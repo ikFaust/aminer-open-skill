@@ -241,6 +241,14 @@ def date_over_two_years_old(value: str) -> bool:
         return False
 
 
+def compact_university_abbreviation(name: str) -> str:
+    """Match the common journal byline form without accepting a different org ID."""
+    value = re.sub(r"\bUniversity of\b", "Univ", name, flags=re.I)
+    value = re.sub(r"\band\b", "&", value, flags=re.I)
+    value = re.sub(r"\bAeronautics\b", "Aeronaut", value, flags=re.I)
+    return re.sub(r"\bAstronautics\b", "Astronaut", value, flags=re.I)
+
+
 def paper_affiliation_match(authors: list[dict], person_id: str, row: dict,
                             client: AMinerClient) -> str | None:
     """Resolve a Chinese school label to the same AMiner org ID and English name."""
@@ -278,8 +286,10 @@ def paper_affiliation_match(authors: list[dict], person_id: str, row: dict,
                 re.sub(r"\bUniversity\b", "Univ", school_name, flags=re.I),
                 re.sub(r"\bUniversity of Science and Technology\b",
                        "Univ Sci & Technol", school_name, flags=re.I),
+                compact_university_abbreviation(school_name),
             ))
         canonical_forms = {canonical, normalized(re.sub(r"\bUniversity\b", "Univ", org_name, flags=re.I)),
+                           normalized(compact_university_abbreviation(org_name)),
                            *(normalized(value) for value in english_forms)}
         for author in target_authors:
             author_org_id = str(author.get("orgid") or "")

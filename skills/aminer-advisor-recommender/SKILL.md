@@ -1,7 +1,7 @@
 ---
 name: aminer-advisor-recommender
 metadata:
-  version: 1.0.83
+  version: 1.0.85
   author: AMiner
   contact: report@aminer.cn
 description: >
@@ -20,6 +20,7 @@ When the script reports an English school alias recovered from an exact author p
 For a compound school-comparison topic, count only papers on the requested task. For example, a medical-image **segmentation** request needs segmentation work in a medical setting; medical-image classification, encryption, diagnosis, or fusion papers are adjacent leads, not segmentation counts. Keep broad retrieval totals separate from the checked task-paper count.
 If the request combines a task and a method with “与/和/and”, check that each counted paper supports **both** parts; otherwise report it separately as adjacent. In particular, industrial zero-shot anomaly detection is not few-shot defect detection, and few-shot machinery fault diagnosis is not visual defect detection. For this compound topic `discover` reports `matched_paper_count` only for papers satisfying both parts and `adjacent_topic_paper_count` for one-sided work. Recommend fewer than the maximum when remaining people have only adjacent work; explain the missing part rather than filling the last slot.
 For industrial few-shot detection, the grouped-topic QA pass is a recall lead. A paper may establish its industrial setting through the abstract's explicitly named industrial data or dataset (e.g. MVTec/BTAD), but the defect/anomaly task and low-data method must be supported by its title or keywords. Keep raw grouped hits out of the count until author affiliation and this joint topic check pass.
+For an advisor list on this compound topic, `named` and `profile` mode exclude people whose attributed papers cover only one side at a time. Do not re-add such a person to a recommendation tier from separate one-sided papers or because the requested maximum has empty slots; show a clearly marked exploratory lead only if useful. A gate rejection for a paper's author or university attribution also excludes that paper until a corrected paper passes a new gate run.
 
 If the user specifies a publication window (for example, **近三年**), a person without an individually attributed direction paper inside that window is a historical or adjacent lead, not a main recommendation. A paper outside the window can provide background but cannot fill a requested recent-work slot. Interpret “近三年” as the current calendar year and previous two calendar years unless the user gives dates; state the chosen interval.
 

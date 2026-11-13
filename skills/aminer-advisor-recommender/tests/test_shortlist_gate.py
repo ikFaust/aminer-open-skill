@@ -59,6 +59,26 @@ class SplitOrganizationAffiliationTests(unittest.TestCase):
             [{**authors[0], "orgid": "different-school"}], "prof", row,
             ChineseEnglishSplitOrgClient()))
 
+    def test_aeronautics_university_abbreviation_requires_exact_org_id(self):
+        class NanhangClient:
+            def call(self, api, params):
+                self_assert = api == "org_search" and params == {"orgs": ["南京航空航天大学"]}
+                if not self_assert:
+                    raise AssertionError((api, params))
+                return {"success": True, "data": [{"org_id": "nuaa", "org_name":
+                    "Nanjing University of Aeronautics and Astronautics"}]}
+
+        row = {"school_names": ["南京航空航天大学",
+                               "Nanjing University of Aeronautics and Astronautics"],
+               "school_domain": "nuaa.edu.cn"}
+        author = {"id": "prof", "orgid": "nuaa",
+                  "org": "Nanjing Univ Aeronaut & Astronaut, Coll Comp Sci & Technol"}
+        self.assertIsNotNone(gate.paper_affiliation_match([author], "prof", row, NanhangClient()))
+        self.assertIsNone(gate.paper_affiliation_match(
+            [{**author, "orgid": "other"}], "prof", row, NanhangClient()))
+        self.assertIsNone(gate.paper_affiliation_match(
+            [{**author, "org": "Nanjing Univ Sci & Technol"}], "prof", row, NanhangClient()))
+
     def test_blocked_official_page_stops_before_paid_details(self):
         class NoPaidCalls:
             def call(self, api, params):

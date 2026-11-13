@@ -729,6 +729,32 @@ def industrial_few_shot_defect_paper(row: dict[str, Any], detail: dict[str, Any]
     return defect and industrial and low_data
 
 
+def industrial_few_shot_focus(terms: list[str]) -> bool:
+    return (
+        any(contains_any(term, ("defect detection", "industrial anomaly detection", "缺陷检测"))
+            for term in terms)
+        and any(contains_any(term, ("few-shot", "few shot", "few-data", "少样本", "小样本"))
+                for term in terms)
+    )
+
+
+def retain_joint_topic_candidates(
+    candidates: dict[str, Candidate], details: dict[str, dict[str, Any]], warnings: list[str],
+) -> dict[str, Candidate]:
+    """Keep only people with an attributed paper at the requested intersection."""
+    retained = {
+        person_id: candidate for person_id, candidate in candidates.items()
+        if any(industrial_few_shot_defect_paper(paper, details.get(str(paper.get("id"))))
+               for paper in candidate.papers.values())
+    }
+    if len(retained) < len(candidates):
+        warnings.append(
+            f"compound task excluded {len(candidates) - len(retained)} one-sided candidate(s); "
+            "their separate defect or few-shot work is a lead, not joint-topic mentor evidence"
+        )
+    return retained
+
+
 def fetch_paper_details(
     client: AMinerClient, paper_ids: list[str], max_details: int, warnings: list[str]
 ) -> dict[str, dict[str, Any]]:
@@ -2029,6 +2055,13 @@ def recommend_for_school(
     # The first three aliases can omit a genuine subfield (e.g. navigation in an
     # embodied-intelligence request), silently deleting its authors after recall.
     evidence_terms = direction_aliases(direction, aliases)
+    compound_focus = industrial_few_shot_focus(evidence_terms)
+    if compound_focus:
+        evidence_terms = list(dict.fromkeys([
+            *evidence_terms, "defect detection", "anomaly detection", "few-shot",
+            "few-shot anomaly detection", "few-shot defect detection",
+            "few-data defect detection", "少样本异常检测",
+        ]))
     if include_collaboration and ("embodied" in normalized_text(direction) or "具身智能" in direction):
         # The broad keyword pass can recover a genuinely embodied-agent paper
         # titled without the literal phrase "embodied intelligence". Retain its
@@ -2152,6 +2185,8 @@ def recommend_for_school(
     if include_collaboration:
         supplement_collaboration_papers(client, candidates, details, organization, evidence_terms, warnings)
         enrich_collaboration(client, candidates, details, warnings, organization)
+    if compound_focus:
+        candidates = retain_joint_topic_candidates(candidates, details, warnings)
     score_candidates(candidates, evidence_terms, school, department, profile)
     if verify_roles:
         verify_candidate_roles(client, candidates, verify_roles, warnings, hired_since, with_portrait)
@@ -2180,13 +2215,8 @@ def discover_institutions(
                                   for term in terms)
         medical_segmentation_focus = medical_image_focus and contains_any(
             direction, ("segmentation", "segmenting", "分割", "勾画"))
-        industrial_few_shot_focus = (
-            any(contains_any(term, ("defect detection", "industrial anomaly detection", "缺陷检测"))
-                for term in terms)
-            and any(contains_any(term, ("few-shot", "few shot", "few-data", "少样本", "小样本"))
-                    for term in terms)
-        )
-        if industrial_few_shot_focus:
+        industrial_few_shot_task = industrial_few_shot_focus(terms)
+        if industrial_few_shot_task:
             evidence_terms = list(dict.fromkeys([
                 *evidence_terms, "defect detection", "anomaly detection", "few-shot",
                 "few-shot anomaly detection", "few-shot defect detection",
@@ -2247,7 +2277,7 @@ def discover_institutions(
                     if row.get("id"):
                         search_rows.setdefault(str(row["id"]), row)
             paired_samples: list[list[dict[str, Any]]] = []
-            if industrial_few_shot_focus:
+            if industrial_few_shot_task:
                 # An OR-like per-term head sample can miss the actual
                 # intersection. The documented grouped-topic query is an
                 # independent lead path; detail attribution and the local
@@ -2362,7 +2392,7 @@ def discover_institutions(
                     weak_topic.append(cleaned)
                 elif medical_segmentation_focus and not medical_segmentation_paper(merged, detail):
                     adjacent_topic.append(cleaned)
-                elif industrial_few_shot_focus and not industrial_few_shot_defect_paper(merged, detail):
+                elif industrial_few_shot_task and not industrial_few_shot_defect_paper(merged, detail):
                     adjacent_topic.append(cleaned)
                 elif medical_image_focus and cleaned["topic_evidence"] == "keywords" \
                         and not medical_imaging_title_focus(cleaned["title"]) \
@@ -2409,7 +2439,7 @@ def discover_institutions(
                              "abstract_only_paper_count": len(weak_topic),
                              "adjacent_topic_paper_count": len(adjacent_topic),
                              "compound_focus": "industrial defect detection AND few-shot visual learning"
-                             if industrial_few_shot_focus else None,
+                             if industrial_few_shot_task else None,
                              "representative_papers": representative,
                              "evidence_papers": recent_examples,
                              "evidence_papers_omitted_count": len(unique_evidence) - len(representative) - len(recent_examples),
