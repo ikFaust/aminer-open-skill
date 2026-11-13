@@ -1365,7 +1365,7 @@ class RecommendationLogicTests(unittest.TestCase):
             "paper_qa_search": lambda p: [
                 {"id": f'{p["org_id"][0]}-{i}', "title": f"Robot Learning Study {i}",
                  "year": CURRENT_YEAR - i, "n_citation_bucket": "201-1000"}
-                for i in range(4)
+                for i in range(5)
             ],
             "paper_search_pro": [],
             "paper_info": lambda p: [{"id": pid, "title": "Robot Learning Study", "year": CURRENT_YEAR}
@@ -1376,8 +1376,8 @@ class RecommendationLogicTests(unittest.TestCase):
         })
         rows = discover_institutions(client, "robot learning", [], 5, [], schools)
         self.assertEqual(len(rows), 9)
-        self.assertTrue(all(row["matched_paper_count"] == 4 for row in rows))
-        self.assertTrue(all(len(row["representative_papers"]) == 2 and len(row["evidence_papers"]) == 1
+        self.assertTrue(all(row["matched_paper_count"] == 5 for row in rows))
+        self.assertTrue(all(len(row["representative_papers"]) == 2 and len(row["evidence_papers"]) == 3
                             for row in rows))
 
     def test_citation_sample_prioritizes_direct_multimodal_work_before_generic_llm_hits(self):

@@ -2208,7 +2208,7 @@ def discover_institutions(
     if schools:
         compared: list[dict[str, Any]] = []
         detail_cap = min(36, max(16, 4 * paper_limit))
-        representative_limit, recent_example_limit = (2, 1) if len(schools) >= 9 else (3, 2)
+        representative_limit, recent_example_limit = (2, 3) if len(schools) >= 9 else (3, 2)
         multimodal_llm_focus = any(contains_any(term, ("multimodal large language model", "多模态大模型"))
                                    for term in terms)
         # A paper's title and keyword list can express the two halves of this
@@ -2425,8 +2425,14 @@ def discover_institutions(
                 unique_evidence, key=lambda paper: (citation_floor(paper), paper["year"]), reverse=True
             )[:representative_limit]
             representative_ids = {paper["id"] for paper in representative}
-            recent_examples = [paper for paper in sorted(unique_evidence, key=lambda paper: paper["year"], reverse=True)
-                               if paper["id"] not in representative_ids][:recent_example_limit]
+            recent_pool = [paper for paper in unique_evidence
+                           if paper["id"] not in representative_ids and paper["year"] >= CURRENT_YEAR - 2]
+            if not recent_pool:
+                recent_pool = [paper for paper in unique_evidence if paper["id"] not in representative_ids]
+            newest = sorted(recent_pool, key=lambda paper: (paper["year"], citation_floor(paper)), reverse=True)
+            influential_recent = sorted(recent_pool,
+                                        key=lambda paper: (citation_floor(paper), paper["year"]), reverse=True)
+            recent_examples = list({paper["id"]: paper for paper in [*newest[:1], *influential_recent]}.values())[:recent_example_limit]
             recent_count = sum(paper["year"] >= CURRENT_YEAR - 2 for paper in unique_evidence)
             influential_count = sum(citation_floor(paper) >= 201 for paper in unique_evidence)
             flagship_count = sum(citation_floor(paper) >= 1001 for paper in unique_evidence)
@@ -3362,7 +3368,7 @@ def main() -> None:
                 "official_seed_leads": official_seed_leads(schools, args.direction, aliases) if schools else {},
                 "warnings": warnings, "errors": errors,
                 "cost_estimate": estimate, "cost": client.cost.summary(),
-                "method_notes": ["Explicit schools use the same terms, year window and per-school detail cap. matched_paper_count uses matched_paper_year_range; recent_direction_paper_count uses the narrower recent_direction_paper_year_range. Both count task-filtered, affiliation-verified distinct titles in the inspected sample. Do not reverse their date labels or describe either as a user-requested window unless its dates match. When compound_focus is set, one-sided papers are in adjacent_topic_paper_count instead. representative_papers and evidence_papers are compact citation-ranked and recent excerpts (at most 2+1 when comparing 9 or more schools, otherwise 3+2). Counts are not national rankings."]
+                "method_notes": ["Explicit schools use the same terms, year window and per-school detail cap. matched_paper_count uses matched_paper_year_range; recent_direction_paper_count uses the narrower recent_direction_paper_year_range. Both count task-filtered, affiliation-verified distinct titles in the inspected sample. Do not reverse their date labels or describe either as a user-requested window unless its dates match. When compound_focus is set, one-sided papers are in adjacent_topic_paper_count instead. representative_papers are citation-ranked; evidence_papers show the newest and influential recent work (at most 2+3 when comparing 9 or more schools, otherwise 3+2). Counts are not national rankings."]
                 if schools else ["Global search is a seed sample, not a national ranking; compare selected schools with --schools."],
             }
             write_result(result, args.output)
