@@ -1,7 +1,7 @@
 ---
 name: aminer-advisor-recommender
 metadata:
-  version: 1.0.90
+  version: 1.0.91
   author: AMiner
   contact: report@aminer.cn
 description: >
@@ -10,12 +10,18 @@ description: >
 
 # AMiner Advisor Recommender
 
+**Choose the mentor-list rule from the user's degree target before naming anyone:**
+- **A specific master's or doctoral application:** A verified row needs a successful gate for that degree. A pending row still needs a live exact-name official faculty page or official faculty roster **and** individually attributed relevant work. If the person's official page is blocked and the official roster did not establish the name, keep them only as an exploratory lead outside the requested maximum, however direct the AMiner paper looks. Never apply the non-applicant pending rule here.
+- **No degree specified:** A disambiguated AMiner person at the school with an attributed on-topic paper may be a clearly labeled current-faculty-pending recommendation; an `unspecified` gate is needed for the verified tier.
+- **Schools only:** Compare affiliation-checked direction papers; do not require individual mentor gates.
+In both mentor workflows, a gate `rejected` for identity or paper attribution excludes that person from both recommendation tiers on that evidence until corrected work passes a new check.
+
 Use AMiner Open Platform REST APIs as the academic-data layer. Plan searches, normalize evidence, score candidates locally, and present explainable recommendations. Never treat a model's prior knowledge as current evidence.
 
 **First-gate deadline for any mentor list:** As soon as one candidate has a live individual official faculty page and an attributed dated on-topic paper, make the very next tool action a shortlist gate call for that person. Resume school coverage only after reading the gate result. Do not defer every gate until all schools or all five slots have been explored; reserve tool turns for final verification. If no gate ran, the verified tier is empty. Copy the number and names of schools actually searched from the tool result, not from the planned list.
 
 **Gate input preflight:** Every `verify_shortlist` candidate using an AMiner paper ID needs `name`, `school_domain` (the university domain, e.g. `buaa.edu.cn`), `school_names` (the first-level university name, e.g. `["北京航空航天大学"]`), `official_profile_url` (that person's page, not a directory), `person_id` when known, and `paper: {aminer_id, title, year}`. The gate uses `school_names` to normalize English paper affiliations; a department name in `organization` does not replace it. If the gate reports a missing field, correct that field before fetching more paid evidence or trying other candidates.
-When the script reports an English school alias recovered from an exact author profile, include **both** the Chinese university name and that English alias in `school_names`; AMiner may assign them different organization IDs and abbreviate the English author affiliation. Do not submit an already unreachable or empty official profile URL to the gate: it cannot approve current faculty identity, and repeated paid paper/person checks will not repair the missing official source. Keep that candidate in the pending tier, state the blocked URL, and gate only once a live person-specific official page has been found.
+When the script reports an English school alias recovered from an exact author profile, include **both** the Chinese university name and that English alias in `school_names`; AMiner may assign them different organization IDs and abbreviate the English author affiliation. Do not submit an already unreachable or empty official profile URL to the gate: it cannot approve current faculty identity, and repeated paid paper/person checks will not repair the missing official source. For a degree-specific request, a blocked person page without a live exact-name official roster leaves the person in exploratory leads only; for a non-applicant mentor search, use the clearly labeled current-faculty-pending tier. State the blocked URL and gate only once a live person-specific official page has been found.
 
 For a compound school-comparison topic, count only papers on the requested task. For example, a medical-image **segmentation** request needs segmentation work in a medical setting; medical-image classification, encryption, diagnosis, or fusion papers are adjacent leads, not segmentation counts. Keep broad retrieval totals separate from the checked task-paper count.
 If the request combines a task and a method with “与/和/and”, check that each counted paper supports **both** parts; otherwise report it separately as adjacent. In particular, industrial zero-shot anomaly detection is not few-shot defect detection, and few-shot machinery fault diagnosis is not visual defect detection. For this compound topic `discover` reports `matched_paper_count` only for papers satisfying both parts and `adjacent_topic_paper_count` for one-sided work. Recommend fewer than the maximum when remaining people have only adjacent work; explain the missing part rather than filling the last slot.
