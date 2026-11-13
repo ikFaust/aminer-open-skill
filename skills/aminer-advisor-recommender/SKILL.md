@@ -1,7 +1,7 @@
 ---
 name: aminer-advisor-recommender
 metadata:
-  version: 1.0.92
+  version: 1.0.93
   author: AMiner
   contact: report@aminer.cn
 description: >
@@ -15,6 +15,8 @@ description: >
 - **No degree specified:** A disambiguated AMiner person at the school with an attributed on-topic paper may be a clearly labeled current-faculty-pending recommendation; an `unspecified` gate is needed for the verified tier.
 - **Schools only:** Compare affiliation-checked direction papers; do not require individual mentor gates.
 In both mentor workflows, a gate `rejected` for identity or paper attribution excludes that person from both recommendation tiers on that evidence until corrected work passes a new check.
+
+**Final answer audit:** Copy each AMiner profile/paper URL from an actual returned ID or `aminer_url`; never assemble an ID from memory. If the exact ID is not in a tool result, omit that link. Report API cost as the sum of each completed script's `cost.total_cost_cny`, each gate's `aminer_cost.total_cost_cny`, and the prices of direct API calls. If the sum is unavailable, give a clearly approximate range without a detailed per-API table. A citation or cost table must not contradict the tool ledger.
 
 Use AMiner Open Platform REST APIs as the academic-data layer. Plan searches, normalize evidence, score candidates locally, and present explainable recommendations. Never treat a model's prior knowledge as current evidence.
 
