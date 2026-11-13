@@ -297,5 +297,46 @@
       "multimodal reasoning",
       "MM-CoT"
     ]
+  },
+  {
+    "school": "苏州大学",
+    "name": "刘司澳",
+    "url": "https://web.suda.edu.cn/lsa/",
+    "checked_on": "2026-11-13",
+    "topic_terms": [
+      "robot",
+      "机器人",
+      "机械臂",
+      "manipulation",
+      "模仿学习",
+      "具身智能"
+    ]
+  },
+  {
+    "school": "杭州电子科技大学",
+    "name": "张波涛",
+    "url": "https://faculty.hdu.edu.cn/zdhxy/zbt/main.htm",
+    "checked_on": "2026-11-13",
+    "topic_terms": [
+      "robot",
+      "机器人",
+      "机械臂",
+      "视觉伺服",
+      "visual servoing"
+    ]
+  },
+  {
+    "school": "东华大学",
+    "name": "万燕",
+    "url": "https://siis.dhu.edu.cn/2012/0220/c24721a366635/page.htm",
+    "checked_on": "2026-11-13",
+    "source_page_published_on": "2015-03-05",
+    "topic_terms": [
+      "few-shot",
+      "少样本",
+      "缺陷检测",
+      "defect detection",
+      "industrial anomaly"
+    ]
   }
 ]

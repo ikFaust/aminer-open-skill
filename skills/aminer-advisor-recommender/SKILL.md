@@ -1,7 +1,7 @@
 ---
 name: aminer-advisor-recommender
 metadata:
-  version: 1.0.87
+  version: 1.0.88
   author: AMiner
   contact: report@aminer.cn
 description: >
