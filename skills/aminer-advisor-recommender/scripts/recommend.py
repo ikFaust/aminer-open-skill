@@ -2433,6 +2433,8 @@ def discover_institutions(
             compared.append({"organization": school,
                              "aminer_organization_name": organization.canonical_name,
                              "organization_id": organization.org_id,
+                             "matched_paper_year_range": f"{CURRENT_YEAR - 5}-{CURRENT_YEAR}",
+                             "recent_direction_paper_year_range": f"{CURRENT_YEAR - 2}-{CURRENT_YEAR}",
                              "keyword_total_hits": keyword_total_hits,
                              "recent_topic_total_hits": recent_topic_total_hits,
                              "matched_paper_count": len(unique_evidence),
@@ -3360,7 +3362,7 @@ def main() -> None:
                 "official_seed_leads": official_seed_leads(schools, args.direction, aliases) if schools else {},
                 "warnings": warnings, "errors": errors,
                 "cost_estimate": estimate, "cost": client.cost.summary(),
-                "method_notes": ["Explicit schools use the same terms, year window and per-school detail cap. matched_paper_count counts task-filtered, affiliation-verified distinct titles in the inspected sample; when compound_focus is set, one-sided papers are in adjacent_topic_paper_count instead. representative_papers and evidence_papers are compact citation-ranked and recent excerpts (at most 2+1 when comparing 9 or more schools, otherwise 3+2). Counts are not national rankings."]
+                "method_notes": ["Explicit schools use the same terms, year window and per-school detail cap. matched_paper_count uses matched_paper_year_range; recent_direction_paper_count uses the narrower recent_direction_paper_year_range. Both count task-filtered, affiliation-verified distinct titles in the inspected sample. Do not reverse their date labels or describe either as a user-requested window unless its dates match. When compound_focus is set, one-sided papers are in adjacent_topic_paper_count instead. representative_papers and evidence_papers are compact citation-ranked and recent excerpts (at most 2+1 when comparing 9 or more schools, otherwise 3+2). Counts are not national rankings."]
                 if schools else ["Global search is a seed sample, not a national ranking; compare selected schools with --schools."],
             }
             write_result(result, args.output)

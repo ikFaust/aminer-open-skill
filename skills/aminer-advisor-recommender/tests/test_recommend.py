@@ -1213,6 +1213,28 @@ class RecommendationLogicTests(unittest.TestCase):
         self.assertTrue(any(api == "paper_qa_search" and params.get("topic_high")
                             for api, params in client.calls))
 
+    def test_discover_labels_total_and_recent_paper_windows(self):
+        papers = {
+            "older": {"id": "older", "title": "Code Generation with Language Models",
+                      "year": CURRENT_YEAR - 4},
+            "recent": {"id": "recent", "title": "Repository Code Generation with Language Models",
+                       "year": CURRENT_YEAR - 1},
+        }
+        for paper in papers.values():
+            paper["authors"] = [{"name": "Researcher", "org": "Alpha University", "orgid": "a"}]
+        client = ScriptedClient({
+            "org_search": [{"org_id": "a", "org_name": "Alpha University", "aliases": []}],
+            "paper_qa_search": [{k: p[k] for k in ("id", "title", "year")} for p in papers.values()],
+            "paper_search_pro": [],
+            "paper_info": lambda p: [papers[pid] for pid in p["ids"]],
+            "paper_detail": lambda p: [papers[p["id"]]],
+        })
+        row = discover_institutions(client, "code generation", [], 5, [], ["Alpha University"])[0]
+        self.assertEqual(row["matched_paper_count"], 2)
+        self.assertEqual(row["recent_direction_paper_count"], 1)
+        self.assertEqual(row["matched_paper_year_range"], f"{CURRENT_YEAR - 5}-{CURRENT_YEAR}")
+        self.assertEqual(row["recent_direction_paper_year_range"], f"{CURRENT_YEAR - 2}-{CURRENT_YEAR}")
+
     def test_compound_mentor_pool_excludes_split_one_sided_portfolio(self):
         joint = {"id": "joint", "title": "Few-shot Surface Defect Detection for Manufacturing",
                  "year": CURRENT_YEAR - 1}
