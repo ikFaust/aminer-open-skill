@@ -1158,6 +1158,9 @@ class RecommendationLogicTests(unittest.TestCase):
                           "year": CURRENT_YEAR - 1},
             "fault": {"id": "fault", "title": "Few-shot Fault Diagnosis of Rotating Machinery",
                       "year": CURRENT_YEAR - 1, "keywords": ["few-shot learning"]},
+            "synthesis": {"id": "synthesis", "title": "Vision-Language Diffusion for Few-Shot Industrial Anomaly Synthesis",
+                          "year": CURRENT_YEAR - 1, "keywords": ["anomaly inspection", "few-shot anomaly synthesis"],
+                          "abstract": "Generated anomalies improve downstream anomaly detection."},
         }
         for paper in papers.values():
             paper["authors"] = [{"name": "A", "org": "Alpha University", "orgid": "a"}]
@@ -1165,6 +1168,7 @@ class RecommendationLogicTests(unittest.TestCase):
         self.assertTrue(industrial_few_shot_defect_paper(papers["few_data"], papers["few_data"]))
         self.assertFalse(industrial_few_shot_defect_paper(papers["zero_shot"], papers["zero_shot"]))
         self.assertFalse(industrial_few_shot_defect_paper(papers["fault"], papers["fault"]))
+        self.assertFalse(industrial_few_shot_defect_paper(papers["synthesis"], papers["synthesis"]))
         client = ScriptedClient({
             "org_search": [{"org_id": "a", "org_name": "Alpha University", "aliases": []}],
             "paper_qa_search": [{k: p[k] for k in ("id", "title", "year")} for p in papers.values()],
@@ -1177,7 +1181,7 @@ class RecommendationLogicTests(unittest.TestCase):
                                                     "industrial anomaly detection"],
             5, [], ["Alpha University"])[0]
         self.assertEqual(row["matched_paper_count"], 2)
-        self.assertEqual(row["adjacent_topic_paper_count"], 2)
+        self.assertEqual(row["adjacent_topic_paper_count"], 3)
         self.assertEqual({p["id"] for p in row["representative_papers"] + row["evidence_papers"]},
                          {"direct", "few_data"})
         self.assertIn("AND", row["compound_focus"])

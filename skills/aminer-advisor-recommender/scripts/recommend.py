@@ -719,6 +719,12 @@ def industrial_few_shot_defect_paper(row: dict[str, Any], detail: dict[str, Any]
     context = combined + " " + normalized_text((detail or {}).get("abstract") or row.get("abstract_slice"))
     if "zero-shot" in title and not re.search(r"few[- ]shot|few[- ]data|small[- ]samples?", title):
         return False
+    # Generating synthetic anomalies can improve a detector, but a synthesis
+    # paper by itself is not evidence that this advisor studies detection.
+    if re.search(r"\b(?:anomal(?:y|ies)|defect) synthesis\b", title) and not re.search(
+        r"\b(?:detect(?:ion)?|segment(?:ation)?|localiz(?:ation)?|inspection)\b", title
+    ):
+        return False
     defect = bool(re.search(r"\b(?:defect|anomal(?:y|ies))\b|缺陷|异常检测", combined))
     industrial = bool(re.search(
         r"\b(?:industr\w*|manufactur\w*|surface|product|fabric|textile|steel|"
