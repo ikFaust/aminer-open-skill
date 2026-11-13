@@ -246,7 +246,8 @@ def compact_university_abbreviation(name: str) -> str:
     value = re.sub(r"\bUniversity of\b", "Univ", name, flags=re.I)
     value = re.sub(r"\band\b", "&", value, flags=re.I)
     value = re.sub(r"\bAeronautics\b", "Aeronaut", value, flags=re.I)
-    return re.sub(r"\bAstronautics\b", "Astronaut", value, flags=re.I)
+    value = re.sub(r"\bAstronautics\b", "Astronaut", value, flags=re.I)
+    return re.sub(r"\bTechnology\b", "Technol", value, flags=re.I)
 
 
 def paper_affiliation_match(authors: list[dict], person_id: str, row: dict,

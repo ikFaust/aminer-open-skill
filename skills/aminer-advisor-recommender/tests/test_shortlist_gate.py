@@ -79,6 +79,25 @@ class SplitOrganizationAffiliationTests(unittest.TestCase):
         self.assertIsNone(gate.paper_affiliation_match(
             [{**author, "org": "Nanjing Univ Sci & Technol"}], "prof", row, NanhangClient()))
 
+    def test_technology_abbreviation_requires_exact_school_id_and_name(self):
+        class HefeiClient:
+            def call(self, api, params):
+                self_assert = api == "org_search" and params == {"orgs": ["合肥工业大学"]}
+                if not self_assert:
+                    raise AssertionError((api, params))
+                return {"success": True, "data": [{"org_id": "hfut", "org_name":
+                    "Hefei University of Technology"}]}
+
+        row = {"school_names": ["合肥工业大学", "Hefei University of Technology"],
+               "school_domain": "hfut.edu.cn"}
+        author = {"id": "prof", "orgid": "hfut",
+                  "org": "Hefei Univ Technol, Sch Electr & Automat"}
+        self.assertIsNotNone(gate.paper_affiliation_match([author], "prof", row, HefeiClient()))
+        self.assertIsNone(gate.paper_affiliation_match(
+            [{**author, "orgid": "other"}], "prof", row, HefeiClient()))
+        self.assertIsNone(gate.paper_affiliation_match(
+            [{**author, "org": "Beijing Univ Technol"}], "prof", row, HefeiClient()))
+
     def test_blocked_official_page_stops_before_paid_details(self):
         class NoPaidCalls:
             def call(self, api, params):
