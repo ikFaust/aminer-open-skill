@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 import json
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -651,5 +652,21 @@ def main():
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
 
 
+def cli_main():
+    """Return a compact failure record for unavailable official pages."""
+    try:
+        main()
+    except urllib.error.HTTPError as exc:
+        print(json.dumps({"source": exc.url,
+                          "errors": [{"type": "http", "status": exc.code}],
+                          "scope": "official page unavailable; no faculty evidence obtained"},
+                         ensure_ascii=False, separators=(",", ":")))
+    except (urllib.error.URLError, TimeoutError) as exc:
+        reason = str(exc.reason) if isinstance(exc, urllib.error.URLError) else "timed out"
+        print(json.dumps({"errors": [{"type": "network", "reason": reason}],
+                          "scope": "official page unavailable; no faculty evidence obtained"},
+                         ensure_ascii=False, separators=(",", ":")))
+
+
 if __name__ == "__main__":
-    main()
+    cli_main()

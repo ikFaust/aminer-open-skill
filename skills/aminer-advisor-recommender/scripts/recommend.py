@@ -3359,7 +3359,8 @@ def main() -> None:
         if args.mode == "discover":
             institutions = discover_institutions(client, args.direction, aliases, args.paper_limit, warnings, schools)
             result = {
-                "workflow": "discover", "query": {"direction": args.direction, "aliases": aliases,
+                "workflow": "discover", "as_of_date": datetime.now(CHINA_TZ).date().isoformat(),
+                "query": {"direction": args.direction, "aliases": aliases,
                                                   "schools": schools, "window": [CURRENT_YEAR - 5, CURRENT_YEAR]},
                 # The caller paid to compare every explicit school. A mentor
                 # candidate limit must not silently hide the last schools.

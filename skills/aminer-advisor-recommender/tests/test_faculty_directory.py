@@ -11,6 +11,16 @@ import faculty_directory as directory  # noqa: E402
 
 
 class FacultyDirectoryTests(unittest.TestCase):
+    def test_cli_reports_unavailable_official_page_without_traceback(self):
+        out = io.StringIO()
+        error = directory.urllib.error.HTTPError(
+            "https://school.edu.cn/faculty", 503, "Service Unavailable", None, None)
+        with (patch.object(directory, "main", side_effect=error), redirect_stdout(out)):
+            directory.cli_main()
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["errors"], [{"type": "http", "status": 503}])
+        self.assertIn("no faculty evidence", payload["scope"])
+
     def test_individual_profile_requires_exact_name_and_reads_combined_degree_role(self):
         profile = directory.Page()
         profile.feed('彭亚新 创建时间：2024-09-24 彭亚新，教授，硕士生/博士生导师。'

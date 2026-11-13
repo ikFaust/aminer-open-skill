@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import json
 from pathlib import Path
 import re
@@ -11,7 +12,9 @@ import re
 
 AMINER_LINK = re.compile(r"https?://(?:www\.)?aminer\.cn/(?:pub|profile)/([0-9a-f]{8,})")
 MONEY = re.compile(r"[¥￥]\s*(\d+(?:\.\d+)?)")
-TOTAL_LABEL = re.compile(r"合计|总计|总费用")
+TOTAL_LABEL = re.compile(r"合计|总计|总费用|\[Cost\]|total cost", re.IGNORECASE)
+RUN_DATE_LABEL = re.compile(r"检索执行日|检索日期|核验日|本次检索日期")
+ISO_DATE = re.compile(r"20\d{2}-\d{2}-\d{2}")
 
 
 def _json_stdout(result: dict) -> dict:
@@ -25,10 +28,18 @@ def _json_stdout(result: dict) -> dict:
 def declared_total(answer: str) -> float | None:
     totals = []
     for line in answer.splitlines():
-        if TOTAL_LABEL.search(line):
-            amounts = MONEY.findall(line)
-            if amounts:
-                totals.append(float(amounts[-1]))
+        label = TOTAL_LABEL.search(line)
+        if not label:
+            continue
+        amounts = list(MONEY.finditer(line))
+        if not amounts:
+            continue
+        before = [m for m in amounts if m.end() <= label.start()]
+        after = [m for m in amounts if m.start() >= label.end()]
+        # The total normally follows its label. Also accept "¥X 总计".
+        amount = before[-1] if before and label.start() - before[-1].end() <= 4 else (
+            after[0] if after else before[-1])
+        totals.append(float(amount.group(1)))
     return totals[-1] if totals else None
 
 
@@ -66,8 +77,19 @@ def audit(record: dict) -> dict:
         errors.append("final answer is empty")
     if missing_ids:
         errors.append("AMiner link IDs absent from tool results")
-    if stated is not None and abs(stated - actual) > 0.10:
-        errors.append("declared total differs from tool ledger by more than CNY 0.10")
+    started = record.get("started_at") or ""
+    if ISO_DATE.match(started):
+        actual_run_date = date.fromisoformat(started[:10])
+        for line in answer.splitlines():
+            if RUN_DATE_LABEL.search(line):
+                for stamp in ISO_DATE.findall(line):
+                    if abs((date.fromisoformat(stamp) - actual_run_date).days) > 1:
+                        errors.append("declared retrieval date differs from run date")
+                        break
+                if "declared retrieval date differs from run date" in errors:
+                    break
+    if stated is not None and abs(stated - actual) > 0.015:
+        errors.append("declared total differs from tool ledger by more than CNY 0.01")
     return {"run": record.get("run"), "status": "pass" if not errors else "fail",
             "errors": errors, "aminer_links": len(ids), "missing_ids": missing_ids,
             "ledger_cost_cny": actual, "ledger_calls": calls,

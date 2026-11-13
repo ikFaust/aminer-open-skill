@@ -338,5 +338,17 @@
       "defect detection",
       "industrial anomaly"
     ]
+  },
+  {
+    "school": "福州大学",
+    "name": "连盛",
+    "url": "https://ccds.fzu.edu.cn/info/1204/8588.htm",
+    "checked_on": "2026-11-13",
+    "source_page_published_on": "2025-06-21",
+    "topic_terms": [
+      "medical image segmentation",
+      "医学图像分割",
+      "半监督分割"
+    ]
   }
 ]
